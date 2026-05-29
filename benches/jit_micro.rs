@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
-use datafusion::arrow::array::{Float64Array, Int64Array};
+use datafusion::arrow::array::{Float64Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use quill_core::database::{Database, DatabaseOptions};
@@ -528,6 +528,8 @@ fn bench_group_aggregate_runtime_boundaries(c: &mut Criterion) {
     let group_count = 1_024_usize;
     let batch = group_batch(row_count, group_count);
     let kernel = group_kernel();
+    let utf8_batch = utf8_group_batch(row_count);
+    let utf8_kernel = utf8_group_kernel();
 
     c.bench_function("runtime/group_aggregate_bind_build_64k", |b| {
         b.iter(|| {
@@ -561,6 +563,32 @@ fn bench_group_aggregate_runtime_boundaries(c: &mut Criterion) {
             |state| black_box(kernel.finish(state).expect("finish dense group aggregate")),
             BatchSize::SmallInput,
         );
+    });
+
+    c.bench_function("runtime/group_aggregate_bind_utf8_pair_build_64k", |b| {
+        b.iter(|| {
+            let mut state = utf8_kernel.new_state();
+            black_box(
+                utf8_kernel
+                    .bind_batch(&mut state, black_box(&utf8_batch))
+                    .expect("bind utf8 group aggregate batch"),
+            );
+            black_box(state);
+        });
+    });
+
+    let mut utf8_probe_state = utf8_kernel.new_state();
+    utf8_kernel
+        .bind_batch(&mut utf8_probe_state, &utf8_batch)
+        .expect("seed utf8 group aggregate state");
+    c.bench_function("runtime/group_aggregate_bind_utf8_pair_probe_64k", |b| {
+        b.iter(|| {
+            black_box(
+                utf8_kernel
+                    .bind_batch(black_box(&mut utf8_probe_state), black_box(&utf8_batch))
+                    .expect("probe utf8 group aggregate batch"),
+            );
+        });
     });
 }
 
@@ -598,6 +626,74 @@ fn group_kernel() -> GroupAggregateKernel {
         ])),
     )
     .expect("group aggregate kernel")
+}
+
+fn utf8_group_batch(row_count: i64) -> RecordBatch {
+    let flags = ["A", "N", "R"];
+    let statuses = ["F", "O"];
+    let return_flags = (0..row_count)
+        .map(|value| flags[value as usize % flags.len()])
+        .collect::<Vec<_>>();
+    let line_statuses = (0..row_count)
+        .map(|value| statuses[value as usize % statuses.len()])
+        .collect::<Vec<_>>();
+    let values = (0..row_count)
+        .map(|value| value % 1_000)
+        .collect::<Vec<_>>();
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("returnflag", DataType::Utf8, false),
+            Field::new("linestatus", DataType::Utf8, false),
+            Field::new("v", DataType::Int64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(return_flags)),
+            Arc::new(StringArray::from(line_statuses)),
+            Arc::new(Int64Array::from(values)),
+        ],
+    )
+    .expect("utf8 group aggregate batch")
+}
+
+fn utf8_group_kernel() -> GroupAggregateKernel {
+    let returnflag = JitExpr::Column {
+        index: 0,
+        name: "returnflag".to_string(),
+        ty: JitType::Utf8,
+        nullable: false,
+    };
+    let linestatus = JitExpr::Column {
+        index: 1,
+        name: "linestatus".to_string(),
+        ty: JitType::Utf8,
+        nullable: false,
+    };
+    let value = JitExpr::Column {
+        index: 2,
+        name: "v".to_string(),
+        ty: JitType::Int64,
+        nullable: false,
+    };
+    GroupAggregateKernel::try_new(
+        &[],
+        vec![returnflag, linestatus],
+        vec![
+            GroupAggregate::new(AggregateFunc::Sum, value, JitType::Int64, "sum_v"),
+            GroupAggregate::new(
+                AggregateFunc::Count,
+                JitExpr::Literal(JitScalar::Int64(1)),
+                JitType::Int64,
+                "count_star",
+            ),
+        ],
+        Arc::new(Schema::new(vec![
+            Field::new("returnflag", DataType::Utf8, false),
+            Field::new("linestatus", DataType::Utf8, false),
+            Field::new("sum_v", DataType::Int64, true),
+            Field::new("count_star", DataType::Int64, true),
+        ])),
+    )
+    .expect("utf8 group aggregate kernel")
 }
 
 fn seeded_dense_group_state(

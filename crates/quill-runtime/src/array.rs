@@ -27,24 +27,78 @@ impl<'a> BatchView<'a> {
     }
 
     pub(super) fn value(&self, index: usize, row: usize) -> JitResult<Scalar> {
-        let column = self
-            .columns
-            .get(index)
-            .ok_or_else(|| JitError::Backend(format!("column index {index} out of bounds")))?;
-        column.value(row)
+        self.column(index)?.value(row)
+    }
+
+    pub(super) fn bool_value(&self, index: usize, row: usize) -> JitResult<Option<bool>> {
+        match self.column(index)? {
+            ColumnView::Bool(array) => Ok(array.is_valid(row).then(|| array.value(row))),
+            _ => Err(JitError::UnsupportedType(format!(
+                "column {index} is not Boolean"
+            ))),
+        }
+    }
+
+    pub(super) fn date32_value(&self, index: usize, row: usize) -> JitResult<Option<i32>> {
+        match self.column(index)? {
+            ColumnView::Date32(array) => Ok(array.is_valid(row).then(|| array.value(row))),
+            _ => Err(JitError::UnsupportedType(format!(
+                "column {index} is not Date32"
+            ))),
+        }
+    }
+
+    pub(super) fn int32_value(&self, index: usize, row: usize) -> JitResult<Option<i32>> {
+        match self.column(index)? {
+            ColumnView::Int32(array) => Ok(array.is_valid(row).then(|| array.value(row))),
+            _ => Err(JitError::UnsupportedType(format!(
+                "column {index} is not Int32"
+            ))),
+        }
+    }
+
+    pub(super) fn int64_value(&self, index: usize, row: usize) -> JitResult<Option<i64>> {
+        match self.column(index)? {
+            ColumnView::Int64(array) => Ok(array.is_valid(row).then(|| array.value(row))),
+            _ => Err(JitError::UnsupportedType(format!(
+                "column {index} is not Int64"
+            ))),
+        }
+    }
+
+    pub(super) fn uint64_value(&self, index: usize, row: usize) -> JitResult<Option<u64>> {
+        match self.column(index)? {
+            ColumnView::UInt64(array) => Ok(array.is_valid(row).then(|| array.value(row))),
+            _ => Err(JitError::UnsupportedType(format!(
+                "column {index} is not UInt64"
+            ))),
+        }
+    }
+
+    pub(super) fn decimal128_value(&self, index: usize, row: usize) -> JitResult<Option<i128>> {
+        match self.column(index)? {
+            ColumnView::Decimal128(array) => Ok(array.is_valid(row).then(|| array.value(row))),
+            _ => Err(JitError::UnsupportedType(format!(
+                "column {index} is not Decimal128"
+            ))),
+        }
     }
 
     pub(super) fn utf8_value(&self, index: usize, row: usize) -> JitResult<Option<&'a str>> {
-        let column = self
-            .columns
-            .get(index)
-            .ok_or_else(|| JitError::Backend(format!("column index {index} out of bounds")))?;
-        match column {
+        match self.column(index)? {
             ColumnView::Utf8(array) => Ok(array.is_valid(row).then(|| array.value(row))),
             _ => Err(JitError::UnsupportedType(format!(
                 "column {index} is not Utf8"
             ))),
         }
+    }
+
+    fn column(&self, index: usize) -> JitResult<&ColumnView<'a>> {
+        let column = self
+            .columns
+            .get(index)
+            .ok_or_else(|| JitError::Backend(format!("column index {index} out of bounds")))?;
+        Ok(column)
     }
 }
 

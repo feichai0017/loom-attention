@@ -25,7 +25,7 @@ pub struct GroupAggregateKernel {
 pub struct GroupAggregateState {
     group_ids: BTreeMap<GroupKey, usize>,
     fast_group_ids: HashMap<Vec<FastKeyValue>, usize>,
-    string_key_ids: Vec<HashMap<Arc<str>, u32>>,
+    string_key_ids: Vec<StringKeyDictionary>,
     groups: Vec<GroupState>,
     dense: Option<GroupAggregateDenseState>,
 }
@@ -101,6 +101,12 @@ enum FastKeyValue {
         precision: u8,
         scale: i8,
     },
+}
+
+#[derive(Debug, Clone)]
+struct StringKeyDictionary {
+    entries: Vec<(Arc<str>, u32)>,
+    map: Option<HashMap<Arc<str>, u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -193,7 +199,7 @@ impl GroupAggregateKernel {
         GroupAggregateState {
             group_ids: BTreeMap::new(),
             fast_group_ids: HashMap::new(),
-            string_key_ids: vec![HashMap::new(); self.keys.len()],
+            string_key_ids: vec![StringKeyDictionary::new(); self.keys.len()],
             groups: Vec::new(),
             dense: None,
         }
@@ -427,8 +433,8 @@ impl GroupAggregateKernel {
                         .transpose()?;
                     key.push(FastKeyValue::Utf8(value));
                 }
-                JitExpr::Column { .. } => {
-                    key.push(FastKeyValue::try_from_scalar(eval_expr(expr, view, row)?)?);
+                JitExpr::Column { index, ty, .. } => {
+                    key.push(fixed_fast_key_value(view, *index, *ty, row)?);
                 }
                 _ => return Ok(false),
             }
@@ -488,14 +494,7 @@ impl GroupAggregateState {
         let dictionary = self.string_key_ids.get_mut(key_index).ok_or_else(|| {
             JitError::Backend(format!("missing string dictionary for key {key_index}"))
         })?;
-        if let Some(id) = dictionary.get(value) {
-            return Ok(*id);
-        }
-        let id = u32::try_from(dictionary.len()).map_err(|_| {
-            JitError::Backend("string group-key dictionary exceeded u32 ids".to_string())
-        })?;
-        dictionary.insert(Arc::from(value), id);
-        Ok(id)
+        dictionary.intern(value)
     }
 
     fn sorted_groups(self) -> Vec<GroupState> {
@@ -587,6 +586,78 @@ impl GroupAggregateState {
 
         Ok(())
     }
+}
+
+fn fixed_fast_key_value(
+    view: &BatchView<'_>,
+    index: usize,
+    ty: JitType,
+    row: usize,
+) -> JitResult<FastKeyValue> {
+    match ty {
+        JitType::Bool => Ok(FastKeyValue::Bool(view.bool_value(index, row)?)),
+        JitType::Date32 => Ok(FastKeyValue::Date32(view.date32_value(index, row)?)),
+        JitType::Int32 => Ok(FastKeyValue::Int32(view.int32_value(index, row)?)),
+        JitType::Int64 => Ok(FastKeyValue::Int64(view.int64_value(index, row)?)),
+        JitType::UInt64 => Ok(FastKeyValue::UInt64(view.uint64_value(index, row)?)),
+        JitType::Decimal128 { precision, scale } => Ok(FastKeyValue::Decimal128 {
+            value: view.decimal128_value(index, row)?,
+            precision,
+            scale,
+        }),
+        JitType::Float64 | JitType::Utf8 => Err(JitError::UnsupportedType(format!(
+            "fast group key does not support {ty:?}"
+        ))),
+    }
+}
+
+const INLINE_STRING_KEY_LIMIT: usize = 16;
+
+impl StringKeyDictionary {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            map: None,
+        }
+    }
+
+    fn intern(&mut self, value: &str) -> JitResult<u32> {
+        if let Some(map) = &mut self.map {
+            if let Some(id) = map.get(value) {
+                return Ok(*id);
+            }
+            let id = next_string_key_id(map.len())?;
+            map.insert(Arc::from(value), id);
+            return Ok(id);
+        }
+
+        for (existing, id) in &self.entries {
+            if existing.as_ref() == value {
+                return Ok(*id);
+            }
+        }
+
+        let id = next_string_key_id(self.entries.len())?;
+        self.entries.push((Arc::from(value), id));
+        if self.entries.len() > INLINE_STRING_KEY_LIMIT {
+            self.promote();
+        }
+        Ok(id)
+    }
+
+    fn promote(&mut self) {
+        let map = self
+            .entries
+            .iter()
+            .map(|(value, id)| (Arc::clone(value), *id))
+            .collect::<HashMap<_, _>>();
+        self.map = Some(map);
+    }
+}
+
+fn next_string_key_id(len: usize) -> JitResult<u32> {
+    u32::try_from(len)
+        .map_err(|_| JitError::Backend("string group-key dictionary exceeded u32 ids".to_string()))
 }
 
 impl AggregateState {
@@ -960,33 +1031,6 @@ impl KeyValue {
                 precision,
                 scale,
             },
-        }
-    }
-}
-
-impl FastKeyValue {
-    fn try_from_scalar(value: Scalar) -> JitResult<Self> {
-        match value {
-            Scalar::Bool(value) => Ok(Self::Bool(value)),
-            Scalar::Date32(value) => Ok(Self::Date32(value)),
-            Scalar::Int32(value) => Ok(Self::Int32(value)),
-            Scalar::Int64(value) => Ok(Self::Int64(value)),
-            Scalar::UInt64(value) => Ok(Self::UInt64(value)),
-            Scalar::Utf8(_) => Err(JitError::Backend(
-                "Utf8 fast keys must be interned from Arrow values".to_string(),
-            )),
-            Scalar::Decimal128 {
-                value,
-                precision,
-                scale,
-            } => Ok(Self::Decimal128 {
-                value,
-                precision,
-                scale,
-            }),
-            Scalar::Float64(_) => Err(JitError::UnsupportedType(
-                "Float64 group keys are not supported by the grouped aggregate runtime".to_string(),
-            )),
         }
     }
 }
