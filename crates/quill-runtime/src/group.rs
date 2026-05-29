@@ -35,6 +35,7 @@ enum KeyValue {
     Date32(Option<i32>),
     Int32(Option<i32>),
     Int64(Option<i64>),
+    Utf8(Option<Arc<str>>),
     Decimal128 {
         value: Option<i128>,
         precision: u8,
@@ -210,7 +211,7 @@ impl AggregateState {
                 if value.is_null() {
                     return Ok(());
                 }
-                *sum = Some(match *sum {
+                *sum = Some(match sum.take() {
                     Some(current) => current.checked_add(value)?,
                     None => value,
                 });
@@ -259,6 +260,7 @@ impl KeyValue {
             Scalar::Date32(value) => Ok(Self::Date32(value)),
             Scalar::Int32(value) => Ok(Self::Int32(value)),
             Scalar::Int64(value) => Ok(Self::Int64(value)),
+            Scalar::Utf8(value) => Ok(Self::Utf8(value)),
             Scalar::Decimal128 {
                 value,
                 precision,
@@ -280,6 +282,7 @@ impl KeyValue {
             Self::Date32(value) => Scalar::Date32(value),
             Self::Int32(value) => Scalar::Int32(value),
             Self::Int64(value) => Scalar::Int64(value),
+            Self::Utf8(value) => Scalar::Utf8(value),
             Self::Decimal128 {
                 value,
                 precision,
@@ -299,6 +302,7 @@ fn ensure_group_key_type(ty: JitType) -> JitResult<()> {
         | JitType::Date32
         | JitType::Int32
         | JitType::Int64
+        | JitType::Utf8
         | JitType::Decimal128 { .. } => Ok(()),
         JitType::Float64 => Err(JitError::UnsupportedType(
             "Float64 group keys are not supported by the grouped aggregate runtime".to_string(),
@@ -324,6 +328,7 @@ fn ensure_aggregate_expr(aggregate: &GroupAggregate) -> JitResult<()> {
             | JitType::Int32
             | JitType::Int64
             | JitType::Float64
+            | JitType::Utf8
             | JitType::Decimal128 { .. } => Ok(()),
         },
     }
@@ -333,11 +338,11 @@ fn update_minmax(target: &mut Option<Scalar>, value: Scalar, ordering: Ordering)
     if value.is_null() {
         return Ok(());
     }
-    let Some(current) = *target else {
+    let Some(current) = target.as_ref() else {
         *target = Some(value);
         return Ok(());
     };
-    if current.partial_cmp_value(value)? == Some(ordering) {
+    if current.clone().partial_cmp_value(value.clone())? == Some(ordering) {
         return Ok(());
     }
     *target = Some(value);
@@ -351,6 +356,7 @@ fn null_scalar(ty: JitType) -> Scalar {
         JitType::Int32 => Scalar::Int32(None),
         JitType::Int64 => Scalar::Int64(None),
         JitType::Float64 => Scalar::Float64(None),
+        JitType::Utf8 => Scalar::Utf8(None),
         JitType::Decimal128 { precision, scale } => Scalar::Decimal128 {
             value: None,
             precision,

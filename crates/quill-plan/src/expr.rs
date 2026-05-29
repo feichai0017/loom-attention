@@ -7,6 +7,7 @@ pub enum JitType {
     Int32,
     Int64,
     Float64,
+    Utf8,
     Decimal128 { precision: u8, scale: i8 },
 }
 
@@ -18,6 +19,7 @@ pub enum JitScalar {
     Int32(i32),
     Int64(i64),
     Float64(f64),
+    Utf8(String),
     Decimal128 {
         value: i128,
         precision: u8,
@@ -34,6 +36,7 @@ impl JitScalar {
             Self::Int32(_) => JitType::Int32,
             Self::Int64(_) => JitType::Int64,
             Self::Float64(_) => JitType::Float64,
+            Self::Utf8(_) => JitType::Utf8,
             Self::Decimal128 {
                 precision, scale, ..
             } => JitType::Decimal128 {
@@ -53,6 +56,7 @@ impl Display for JitScalar {
             Self::Int32(value) => write!(f, "{value}:i32"),
             Self::Int64(value) => write!(f, "{value}:i64"),
             Self::Float64(value) => write!(f, "{value}:f64"),
+            Self::Utf8(value) => write!(f, "{value:?}:utf8"),
             Self::Decimal128 {
                 value,
                 precision,
@@ -179,6 +183,7 @@ impl Display for JitType {
             Self::Int32 => "i32",
             Self::Int64 => "i64",
             Self::Float64 => "f64",
+            Self::Utf8 => "utf8",
             Self::Decimal128 { .. } => "decimal128",
         };
         f.write_str(ty)

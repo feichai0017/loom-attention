@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use quill_plan::{JitBinaryOp, JitError, JitExpr, JitResult, JitScalar, JitType};
 
 use super::array::BatchView;
-use super::value::{option_zip, type_mismatch, Scalar};
+use super::value::{option_zip, type_mismatch_types, Scalar};
 
 pub(super) fn eval_expr(expr: &JitExpr, view: &BatchView<'_>, row: usize) -> JitResult<Scalar> {
     match expr {
@@ -44,6 +46,7 @@ fn eval_literal(value: &JitScalar) -> Scalar {
             JitType::Int32 => Scalar::Int32(None),
             JitType::Int64 => Scalar::Int64(None),
             JitType::Float64 => Scalar::Float64(None),
+            JitType::Utf8 => Scalar::Utf8(None),
             JitType::Decimal128 { precision, scale } => Scalar::Decimal128 {
                 value: None,
                 precision: *precision,
@@ -55,6 +58,7 @@ fn eval_literal(value: &JitScalar) -> Scalar {
         JitScalar::Int32(value) => Scalar::Int32(Some(*value)),
         JitScalar::Int64(value) => Scalar::Int64(Some(*value)),
         JitScalar::Float64(value) => Scalar::Float64(Some(*value)),
+        JitScalar::Utf8(value) => Scalar::Utf8(Some(Arc::from(value.as_str()))),
         JitScalar::Decimal128 {
             value,
             precision,
@@ -84,6 +88,8 @@ fn eval_binary(op: JitBinaryOp, lhs: Scalar, rhs: Scalar) -> JitResult<Scalar> {
 }
 
 fn eval_arithmetic(op: JitBinaryOp, lhs: Scalar, rhs: Scalar) -> JitResult<Scalar> {
+    let lhs_ty = lhs.ty();
+    let rhs_ty = rhs.ty();
     match (lhs, rhs) {
         (Scalar::Int32(lhs), Scalar::Int32(rhs)) => Ok(Scalar::Int32(option_zip(lhs, rhs).map(
             |(lhs, rhs)| match op {
@@ -129,11 +135,13 @@ fn eval_arithmetic(op: JitBinaryOp, lhs: Scalar, rhs: Scalar) -> JitResult<Scala
             rhs_precision,
             rhs_scale,
         ),
-        _ => Err(type_mismatch(lhs, rhs)),
+        _ => Err(type_mismatch_types(lhs_ty, rhs_ty)),
     }
 }
 
 fn eval_comparison(op: JitBinaryOp, lhs: Scalar, rhs: Scalar) -> JitResult<Scalar> {
+    let lhs_ty = lhs.ty();
+    let rhs_ty = rhs.ty();
     let value = match (lhs, rhs) {
         (Scalar::Bool(lhs), Scalar::Bool(rhs))
             if matches!(op, JitBinaryOp::Eq | JitBinaryOp::NotEq) =>
@@ -151,6 +159,9 @@ fn eval_comparison(op: JitBinaryOp, lhs: Scalar, rhs: Scalar) -> JitResult<Scala
         }
         (Scalar::Float64(lhs), Scalar::Float64(rhs)) => {
             option_zip(lhs, rhs).map(|(lhs, rhs)| compare_ord(op, lhs, rhs))
+        }
+        (Scalar::Utf8(lhs), Scalar::Utf8(rhs)) => {
+            option_zip(lhs, rhs).map(|(lhs, rhs)| compare_ord(op, lhs.as_ref(), rhs.as_ref()))
         }
         (
             Scalar::Decimal128 {
@@ -171,14 +182,16 @@ fn eval_comparison(op: JitBinaryOp, lhs: Scalar, rhs: Scalar) -> JitResult<Scala
             }
             option_zip(lhs, rhs).map(|(lhs, rhs)| compare_ord(op, lhs, rhs))
         }
-        _ => return Err(type_mismatch(lhs, rhs)),
+        _ => return Err(type_mismatch_types(lhs_ty, rhs_ty)),
     };
     Ok(Scalar::Bool(value))
 }
 
 fn eval_boolean(op: JitBinaryOp, lhs: Scalar, rhs: Scalar) -> JitResult<Scalar> {
+    let lhs_ty = lhs.ty();
+    let rhs_ty = rhs.ty();
     let (Scalar::Bool(lhs), Scalar::Bool(rhs)) = (lhs, rhs) else {
-        return Err(type_mismatch(lhs, rhs));
+        return Err(type_mismatch_types(lhs_ty, rhs_ty));
     };
     let value = match op {
         JitBinaryOp::And => match (lhs, rhs) {

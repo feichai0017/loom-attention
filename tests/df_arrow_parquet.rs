@@ -524,7 +524,7 @@ async fn group_aggregate_runtime_executes_partial_pipeline() {
 }
 
 #[tokio::test]
-async fn string_group_keys_stay_on_datafusion_until_key_interning() {
+async fn string_group_keys_use_runtime_group_aggregate_boundary() {
     let db = Database::new_temp().expect("database");
     let schema = Arc::new(Schema::new(vec![
         Field::new("flag", DataType::Utf8, false),
@@ -555,9 +555,23 @@ async fn string_group_keys_stay_on_datafusion_until_key_interning() {
 
     let trace = db.debug_last_trace().expect("trace");
     assert!(
-        !trace.physical_plan.contains("CompiledPipelineExec"),
+        trace.physical_plan.contains("CompiledPipelineExec"),
         "{}",
         trace.physical_plan
+    );
+    assert!(
+        trace
+            .pipeline_candidates
+            .iter()
+            .any(|candidate| candidate.node == "CompiledPipelineExec"
+                && candidate.kind == PipelineKind::Aggregate
+                && candidate.compiled
+                && candidate.source == "arrow_batch"
+                && candidate.sink == "group_aggregate"
+                && candidate.backend.as_deref() == Some("quill-runtime")
+                && candidate.reason == "compiled"),
+        "{:?}",
+        trace.pipeline_candidates
     );
 }
 

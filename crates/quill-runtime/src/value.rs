@@ -1,14 +1,16 @@
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use quill_plan::{JitError, JitType};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum Scalar {
     Bool(Option<bool>),
     Date32(Option<i32>),
     Int32(Option<i32>),
     Int64(Option<i64>),
     Float64(Option<f64>),
+    Utf8(Option<Arc<str>>),
     Decimal128 {
         value: Option<i128>,
         precision: u8,
@@ -17,7 +19,7 @@ pub(super) enum Scalar {
 }
 
 impl Scalar {
-    pub(super) fn is_filter_true(self) -> Result<bool, JitError> {
+    pub(super) fn is_filter_true(&self) -> Result<bool, JitError> {
         match self {
             Self::Bool(value) => Ok(value.unwrap_or(false)),
             other => Err(JitError::Backend(format!(
@@ -27,31 +29,38 @@ impl Scalar {
         }
     }
 
-    pub(super) fn ty(self) -> JitType {
+    pub(super) fn ty(&self) -> JitType {
         match self {
             Self::Bool(_) => JitType::Bool,
             Self::Date32(_) => JitType::Date32,
             Self::Int32(_) => JitType::Int32,
             Self::Int64(_) => JitType::Int64,
             Self::Float64(_) => JitType::Float64,
+            Self::Utf8(_) => JitType::Utf8,
             Self::Decimal128 {
                 precision, scale, ..
-            } => JitType::Decimal128 { precision, scale },
+            } => JitType::Decimal128 {
+                precision: *precision,
+                scale: *scale,
+            },
         }
     }
 
-    pub(super) fn is_null(self) -> bool {
+    pub(super) fn is_null(&self) -> bool {
         match self {
             Self::Bool(value) => value.is_none(),
             Self::Date32(value) => value.is_none(),
             Self::Int32(value) => value.is_none(),
             Self::Int64(value) => value.is_none(),
             Self::Float64(value) => value.is_none(),
+            Self::Utf8(value) => value.is_none(),
             Self::Decimal128 { value, .. } => value.is_none(),
         }
     }
 
     pub(super) fn checked_add(self, rhs: Self) -> Result<Self, JitError> {
+        let lhs_ty = self.ty();
+        let rhs_ty = rhs.ty();
         match (self, rhs) {
             (Self::Int32(lhs), Self::Int32(rhs)) => {
                 Ok(Self::Int32(add_options(lhs, rhs, i32::wrapping_add)))
@@ -85,11 +94,13 @@ impl Scalar {
                     scale: lhs_scale,
                 })
             }
-            _ => Err(type_mismatch(self, rhs)),
+            _ => Err(type_mismatch_types(lhs_ty, rhs_ty)),
         }
     }
 
     pub(super) fn partial_cmp_value(self, rhs: Self) -> Result<Option<Ordering>, JitError> {
+        let lhs_ty = self.ty();
+        let rhs_ty = rhs.ty();
         match (self, rhs) {
             (Self::Bool(lhs), Self::Bool(rhs)) => {
                 Ok(option_zip(lhs, rhs).map(|(lhs, rhs)| lhs.cmp(&rhs)))
@@ -105,6 +116,9 @@ impl Scalar {
             }
             (Self::Float64(lhs), Self::Float64(rhs)) => {
                 Ok(option_zip(lhs, rhs).and_then(|(lhs, rhs)| lhs.partial_cmp(&rhs)))
+            }
+            (Self::Utf8(lhs), Self::Utf8(rhs)) => {
+                Ok(option_zip(lhs, rhs).map(|(lhs, rhs)| lhs.as_ref().cmp(rhs.as_ref())))
             }
             (
                 Self::Decimal128 {
@@ -125,7 +139,7 @@ impl Scalar {
                 }
                 Ok(option_zip(lhs, rhs).map(|(lhs, rhs)| lhs.cmp(&rhs)))
             }
-            _ => Err(type_mismatch(self, rhs)),
+            _ => Err(type_mismatch_types(lhs_ty, rhs_ty)),
         }
     }
 }
@@ -146,6 +160,6 @@ pub(super) fn option_zip<T, U>(lhs: Option<T>, rhs: Option<U>) -> Option<(T, U)>
     }
 }
 
-pub(super) fn type_mismatch(lhs: Scalar, rhs: Scalar) -> JitError {
-    JitError::UnsupportedExpr(format!("type mismatch: {:?} vs {:?}", lhs.ty(), rhs.ty()))
+pub(super) fn type_mismatch_types(lhs: JitType, rhs: JitType) -> JitError {
+    JitError::UnsupportedExpr(format!("type mismatch: {lhs:?} vs {rhs:?}"))
 }

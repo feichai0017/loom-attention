@@ -63,10 +63,11 @@ surfaces. Rust calls into that package through `melior`.
 
 Current compiled coverage is intentionally narrow: fixed-width
 `filter -> project -> record_batch` and fixed-width `filter -> SUM`, including
-the Q6-style `Date32`/`Decimal128` case. Fixed-width `group_aggregate`
-pipelines can be replaced through the Arrow host runtime; MLIR hash aggregate
-lowering is still the next step. Unsupported expressions or unsafe Arrow layouts
-stay on the safe Rust runtime or DataFusion path.
+the Q6-style `Date32`/`Decimal128` case. `group_aggregate` pipelines can be
+replaced through the Arrow host runtime for fixed-width keys and Utf8 keys; MLIR
+hash aggregate lowering and string key interning are still the next step.
+Unsupported expressions or unsafe Arrow layouts stay on the safe Rust runtime or
+DataFusion path.
 
 ## Quick Start
 

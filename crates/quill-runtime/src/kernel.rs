@@ -206,7 +206,7 @@ fn ensure_fixed_width_type(ty: JitType) -> Option<()> {
         JitType::Date32 | JitType::Int64 | JitType::Float64 | JitType::Decimal128 { .. } => {
             Some(())
         }
-        JitType::Bool | JitType::Int32 => None,
+        JitType::Bool | JitType::Int32 | JitType::Utf8 => None,
     }
 }
 
@@ -215,7 +215,7 @@ fn ensure_record_output_type(ty: JitType) -> Option<()> {
         JitType::Date32 | JitType::Int64 | JitType::Float64 | JitType::Decimal128 { .. } => {
             Some(())
         }
-        JitType::Bool | JitType::Int32 => None,
+        JitType::Bool | JitType::Int32 | JitType::Utf8 => None,
     }
 }
 

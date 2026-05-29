@@ -58,6 +58,7 @@ pub(crate) fn jit_type(data_type: &ArrowDataType) -> JitResult<JitType> {
         ArrowDataType::Int32 => Ok(JitType::Int32),
         ArrowDataType::Int64 => Ok(JitType::Int64),
         ArrowDataType::Float64 => Ok(JitType::Float64),
+        ArrowDataType::Utf8 => Ok(JitType::Utf8),
         ArrowDataType::Decimal128(precision, scale) => Ok(JitType::Decimal128 {
             precision: *precision,
             scale: *scale,
@@ -79,6 +80,8 @@ fn jit_scalar(value: &ScalarValue) -> JitResult<JitScalar> {
         ScalarValue::Int64(None) => Ok(JitScalar::Null(JitType::Int64)),
         ScalarValue::Float64(Some(value)) => Ok(JitScalar::Float64(*value)),
         ScalarValue::Float64(None) => Ok(JitScalar::Null(JitType::Float64)),
+        ScalarValue::Utf8(Some(value)) => Ok(JitScalar::Utf8(value.clone())),
+        ScalarValue::Utf8(None) => Ok(JitScalar::Null(JitType::Utf8)),
         ScalarValue::Decimal128(Some(value), precision, scale) => Ok(JitScalar::Decimal128 {
             value: *value,
             precision: *precision,

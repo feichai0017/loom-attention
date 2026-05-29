@@ -282,6 +282,11 @@ impl ScalarEmitter {
                     mlir_type(ty)
                 ));
             }
+            JitScalar::Utf8(_) => {
+                return Err(JitError::UnsupportedExpr(
+                    "MLIR lowering does not yet support Utf8 literals".to_string(),
+                ));
+            }
             JitScalar::Decimal128 { value, .. } => {
                 self.lines.push(format!(
                     "    {name} = arith.constant {value} : {}",
@@ -402,6 +407,11 @@ impl ScalarEmitter {
                     format_op(op)
                 )));
             }
+            JitType::Utf8 => {
+                return Err(JitError::UnsupportedExpr(
+                    "Utf8 comparisons are not supported by MLIR lowering".to_string(),
+                ));
+            }
             JitType::Date32 | JitType::Int32 | JitType::Int64 | JitType::Decimal128 { .. } => {
                 let predicate = match op {
                     JitBinaryOp::Eq => "eq",
@@ -481,6 +491,7 @@ fn mlir_type(ty: JitType) -> &'static str {
         JitType::Int32 => "i32",
         JitType::Int64 => "i64",
         JitType::Float64 => "f64",
+        JitType::Utf8 => "!quill.scalar",
         JitType::Decimal128 { .. } => "i128",
     }
 }
@@ -529,6 +540,7 @@ fn format_scalar(value: &JitScalar) -> String {
         JitScalar::Int32(value) => format!("{value}:i32"),
         JitScalar::Int64(value) => format!("{value}:i64"),
         JitScalar::Float64(value) => format!("{value}:f64"),
+        JitScalar::Utf8(value) => format!("{value:?}:utf8"),
         JitScalar::Decimal128 {
             value,
             precision,
@@ -546,6 +558,7 @@ fn format_type(ty: JitType) -> &'static str {
         JitType::Int32 => "i32",
         JitType::Int64 => "i64",
         JitType::Float64 => "f64",
+        JitType::Utf8 => "utf8",
         JitType::Decimal128 { .. } => "decimal128",
     }
 }

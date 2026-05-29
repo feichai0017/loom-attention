@@ -120,10 +120,10 @@ project measure real operator boundaries before taking on joins, hash
 repartitioning, or whole-query pipeline lowering. The plain aggregate path now
 has both a DataFusion-safe fixed-width Arrow runtime and an executable MLIR
 dispatch path for the same fixed-width column layout, using the same `PlainSum`
-`PipelineSpec`. Fixed-width grouped aggregates can now replace DataFusion's
-partial aggregate with a `quill-runtime` grouped aggregate pipeline, while Q1's
-string group keys still require the planned dictionary/interned-key binding
-before the Q1 hot path can move into Quill.
+`PipelineSpec`. Grouped aggregates can now replace DataFusion's partial aggregate
+with a `quill-runtime` grouped aggregate pipeline for fixed-width keys and Utf8
+keys. The next Q1 step is to move the aggregate hot loop from the host runtime
+into MLIR with dictionary/interned string key binding.
 
 The intended compiler path is:
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Date32Builder, Decimal128Array,
     Decimal128Builder, Float64Array, Float64Builder, Int32Array, Int32Builder, Int64Array,
-    Int64Builder,
+    Int64Builder, StringArray, StringBuilder,
 };
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow::record_batch::RecordBatch;
@@ -41,6 +41,7 @@ enum ColumnView<'a> {
     Int32(&'a Int32Array),
     Int64(&'a Int64Array),
     Float64(&'a Float64Array),
+    Utf8(&'a StringArray),
     Decimal128(&'a Decimal128Array),
 }
 
@@ -72,6 +73,11 @@ impl<'a> ColumnView<'a> {
                 .downcast_ref::<Float64Array>()
                 .map(Self::Float64)
                 .ok_or_else(|| JitError::UnsupportedType("Float64".to_string())),
+            ArrowDataType::Utf8 => array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(Self::Utf8)
+                .ok_or_else(|| JitError::UnsupportedType("Utf8".to_string())),
             ArrowDataType::Decimal128(_, _) => array
                 .as_any()
                 .downcast_ref::<Decimal128Array>()
@@ -92,6 +98,9 @@ impl<'a> ColumnView<'a> {
             Self::Float64(array) => Ok(Scalar::Float64(
                 array.is_valid(row).then(|| array.value(row)),
             )),
+            Self::Utf8(array) => Ok(Scalar::Utf8(
+                array.is_valid(row).then(|| Arc::from(array.value(row))),
+            )),
             Self::Decimal128(array) => Ok(Scalar::Decimal128 {
                 value: array.is_valid(row).then(|| array.value(row)),
                 precision: array.precision(),
@@ -107,6 +116,7 @@ pub(super) enum OutputBuilder {
     Int32(Int32Builder),
     Int64(Int64Builder),
     Float64(Float64Builder),
+    Utf8(StringBuilder),
     Decimal128(Decimal128Builder),
 }
 
@@ -118,6 +128,7 @@ impl OutputBuilder {
             JitType::Int32 => Self::Int32(Int32Builder::with_capacity(capacity)),
             JitType::Int64 => Self::Int64(Int64Builder::with_capacity(capacity)),
             JitType::Float64 => Self::Float64(Float64Builder::with_capacity(capacity)),
+            JitType::Utf8 => Self::Utf8(StringBuilder::with_capacity(capacity, capacity * 8)),
             JitType::Decimal128 { precision, scale } => Self::Decimal128(
                 Decimal128Builder::with_capacity(capacity)
                     .with_data_type(ArrowDataType::Decimal128(precision, scale)),
@@ -132,6 +143,10 @@ impl OutputBuilder {
             ArrowDataType::Int32 => Ok(Self::Int32(Int32Builder::with_capacity(capacity))),
             ArrowDataType::Int64 => Ok(Self::Int64(Int64Builder::with_capacity(capacity))),
             ArrowDataType::Float64 => Ok(Self::Float64(Float64Builder::with_capacity(capacity))),
+            ArrowDataType::Utf8 => Ok(Self::Utf8(StringBuilder::with_capacity(
+                capacity,
+                capacity * 8,
+            ))),
             ArrowDataType::Decimal128(precision, scale) => Ok(Self::Decimal128(
                 Decimal128Builder::with_capacity(capacity)
                     .with_data_type(ArrowDataType::Decimal128(*precision, *scale)),
@@ -147,6 +162,7 @@ impl OutputBuilder {
             (Self::Int32(builder), Scalar::Int32(value)) => builder.append_option(value),
             (Self::Int64(builder), Scalar::Int64(value)) => builder.append_option(value),
             (Self::Float64(builder), Scalar::Float64(value)) => builder.append_option(value),
+            (Self::Utf8(builder), Scalar::Utf8(value)) => builder.append_option(value.as_deref()),
             (
                 Self::Decimal128(builder),
                 Scalar::Decimal128 {
@@ -172,6 +188,7 @@ impl OutputBuilder {
             Self::Int32(builder) => Arc::new(builder.finish()) as ArrayRef,
             Self::Int64(builder) => Arc::new(builder.finish()) as ArrayRef,
             Self::Float64(builder) => Arc::new(builder.finish()) as ArrayRef,
+            Self::Utf8(builder) => Arc::new(builder.finish()) as ArrayRef,
             Self::Decimal128(builder) => Arc::new(builder.finish()) as ArrayRef,
         };
         Ok(array)
@@ -185,6 +202,7 @@ pub(super) fn arrow_type(ty: JitType) -> ArrowDataType {
         JitType::Int32 => ArrowDataType::Int32,
         JitType::Int64 => ArrowDataType::Int64,
         JitType::Float64 => ArrowDataType::Float64,
+        JitType::Utf8 => ArrowDataType::Utf8,
         JitType::Decimal128 { precision, scale } => ArrowDataType::Decimal128(precision, scale),
     }
 }
