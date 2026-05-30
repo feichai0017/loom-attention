@@ -486,13 +486,19 @@ impl ExecutionPlan for CompiledGlobalGroupAggregateExec {
             )));
         }
 
+        let input_partitions = self.input.properties().partitioning.partition_count();
+        let mut streams = Vec::with_capacity(input_partitions);
+        for input_partition in 0..input_partitions {
+            streams.push(Some(
+                self.input.execute(input_partition, Arc::clone(&context))?,
+            ));
+        }
+
         Ok(Box::pin(CompiledGlobalGroupAggregateStream {
             schema: Arc::clone(&self.schema),
-            input: Arc::clone(&self.input),
-            context,
-            current: None,
-            next_partition: 0,
-            input_partitions: self.input.properties().partitioning.partition_count(),
+            streams,
+            next_stream: 0,
+            open_streams: input_partitions,
             runtime: self.runtime.clone(),
             kernel: self.kernel.clone(),
             state: self.runtime.new_state(),
@@ -525,11 +531,9 @@ struct CompiledGroupAggregateStream {
 
 struct CompiledGlobalGroupAggregateStream {
     schema: ArrowSchemaRef,
-    input: Arc<dyn ExecutionPlan>,
-    context: Arc<TaskContext>,
-    current: Option<SendableRecordBatchStream>,
-    next_partition: usize,
-    input_partitions: usize,
+    streams: Vec<Option<SendableRecordBatchStream>>,
+    next_stream: usize,
+    open_streams: usize,
     runtime: GroupAggregateKernel,
     kernel: CompiledKernel,
     state: GroupAggregateState,
@@ -650,9 +654,27 @@ impl Stream for CompiledGlobalGroupAggregateStream {
         }
 
         loop {
-            if let Some(input) = &mut self.current {
-                match ready!(input.poll_next_unpin(cx)) {
-                    Some(Ok(batch)) => {
+            if self.open_streams == 0 {
+                self.emitted = true;
+                let runtime = self.runtime.clone();
+                let state = std::mem::replace(&mut self.state, runtime.new_state());
+                return Poll::Ready(Some(
+                    runtime.finish_final(state).map_err(crate::map_jit_err),
+                ));
+            }
+
+            let mut made_progress = false;
+            let stream_count = self.streams.len();
+            for _ in 0..stream_count {
+                let stream_index = self.next_stream % stream_count;
+                self.next_stream = (stream_index + 1) % stream_count;
+                let Some(input) = self.streams[stream_index].as_mut() else {
+                    continue;
+                };
+
+                match input.poll_next_unpin(cx) {
+                    Poll::Ready(Some(Ok(batch))) => {
+                        made_progress = true;
                         let runtime = self.runtime.clone();
                         let kernel = self.kernel.clone();
                         let mut state = std::mem::replace(&mut self.state, runtime.new_state());
@@ -662,35 +684,22 @@ impl Stream for CompiledGlobalGroupAggregateStream {
                         if let Err(err) = result {
                             return Poll::Ready(Some(Err(err)));
                         }
+                        break;
                     }
-                    Some(Err(err)) => return Poll::Ready(Some(Err(err))),
-                    None => {
-                        self.current = None;
+                    Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
+                    Poll::Ready(None) => {
+                        made_progress = true;
+                        self.streams[stream_index] = None;
+                        self.open_streams -= 1;
+                        break;
                     }
+                    Poll::Pending => {}
                 }
-                continue;
             }
 
-            if self.next_partition < self.input_partitions {
-                match self
-                    .input
-                    .execute(self.next_partition, Arc::clone(&self.context))
-                {
-                    Ok(stream) => {
-                        self.current = Some(stream);
-                        self.next_partition += 1;
-                    }
-                    Err(err) => return Poll::Ready(Some(Err(err))),
-                }
-                continue;
+            if !made_progress {
+                return Poll::Pending;
             }
-
-            self.emitted = true;
-            let runtime = self.runtime.clone();
-            let state = std::mem::replace(&mut self.state, runtime.new_state());
-            return Poll::Ready(Some(
-                runtime.finish_final(state).map_err(crate::map_jit_err),
-            ));
         }
     }
 }
