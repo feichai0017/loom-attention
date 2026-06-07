@@ -1,14 +1,15 @@
 [package]
 name = "quillcache-gateway"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 description = "OpenAI-compatible gateway and event ingest service for QuillCache"
 license = "MIT"
+repository = "https://github.com/feichai0017/quillcache"
 
 [dependencies]
 axum = { workspace = true }
-quillcache-control = { path = "../quillcache-control", version = "0.1.0" }
-quillcache-core = { path = "../quillcache-core", version = "0.1.0" }
+quillcache-control = { path = "../quillcache-control", version = "0.1.0-alpha.1" }
+quillcache-core = { path = "../quillcache-core", version = "0.1.0-alpha.1" }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

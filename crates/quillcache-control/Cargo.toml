@@ -1,12 +1,13 @@
 [package]
 name = "quillcache-control"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 description = "Control-plane state and policy service for QuillCache"
 license = "MIT"
+repository = "https://github.com/feichai0017/quillcache"
 
 [dependencies]
-quillcache-core = { path = "../quillcache-core", version = "0.1.0" }
-quillcache-router = { path = "../quillcache-router", version = "0.1.0" }
+quillcache-core = { path = "../quillcache-core", version = "0.1.0-alpha.1" }
+quillcache-router = { path = "../quillcache-router", version = "0.1.0-alpha.1" }
 serde = { workspace = true }
 thiserror = { workspace = true }

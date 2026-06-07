@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "quillcache"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "clap",
  "quillcache-core",
@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "quillcache-control"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "quillcache-core",
  "quillcache-router",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "quillcache-core"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "quillcache-gateway"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "axum",
  "quillcache-control",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "quillcache-router"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "quillcache-core",
  "serde",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "quillcache-sim"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "quillcache-core",
  "quillcache-router",

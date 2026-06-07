@@ -31,19 +31,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [package]
 name = "quillcache"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
-description = "Research prototype for an inference state plane and distributed KV cache manager"
+description = "Vendor-neutral KV cache control plane and evaluation platform for LLM serving"
 license = "MIT"
 repository = "https://github.com/feichai0017/quillcache"
 readme = "README.md"
+keywords = ["llm", "kv-cache", "inference", "serving", "control-plane"]
+categories = ["caching", "development-tools"]
 
 [dependencies]
 clap = { workspace = true }
-quillcache-core = { version = "0.1.0", path = "crates/quillcache-core" }
-quillcache-gateway = { version = "0.1.0", path = "crates/quillcache-gateway" }
-quillcache-router = { version = "0.1.0", path = "crates/quillcache-router" }
-quillcache-sim = { version = "0.1.0", path = "crates/quillcache-sim" }
+quillcache-core = { version = "0.1.0-alpha.1", path = "crates/quillcache-core" }
+quillcache-gateway = { version = "0.1.0-alpha.1", path = "crates/quillcache-gateway" }
+quillcache-router = { version = "0.1.0-alpha.1", path = "crates/quillcache-router" }
+quillcache-sim = { version = "0.1.0-alpha.1", path = "crates/quillcache-sim" }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
