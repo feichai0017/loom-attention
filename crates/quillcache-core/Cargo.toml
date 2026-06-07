@@ -1,6 +1,6 @@
 [package]
 name = "quillcache-core"
-version = "0.1.0-alpha.1"
+version = "1.0.0-alpha.1"
 edition = "2021"
 description = "Core data model and cost model for QuillCache"
 license = "MIT"
