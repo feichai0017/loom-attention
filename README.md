@@ -117,7 +117,22 @@ quillcache safe-reuse           # 12 identities share each prefix
 The guard eliminates **all** unsafe reuse while preserving safe same-identity
 reuse, at a measured cost (here ~12.7 s of prefill recompute to avoid 8800 unsafe
 serves). Push it to a privacy-heavy mix (`--tenants 32 --adapters 0`) and **98.4%**
-of the naive cache's hits are cross-tenant leaks. This is the contract the
+of the naive cache's hits are cross-tenant leaks.
+
+**Safety is near-free in practice.** The 95.7% figure is an adversarial workload
+(every identity collides). On a realistic mix where most reuse is same-identity
+(`--tenants 2 --adapters 1 --repeats 40`), the guard's overhead — forced
+recomputes as a fraction of all reuse work — drops to **1.7%**, while it still
+refuses 32000 unsafe serves. The safety constraint costs ~0 exactly where it
+matters.
+
+**Enforced inline, not just in the experiment.** The same check runs on the live
+gateway: `ControlPlane::audit_reuse` flags any request block whose content is
+resident only under another identity, and the response carries
+`x-quillcache-reuse-refused: N`. Verified live — after a `tenant-a` request
+caches a prefix, a `tenant-b` request for the *same content* returns
+`x-quillcache-local-hits: 0` and `x-quillcache-reuse-refused: 2`: QuillCache
+refuses to serve tenant A's KV to tenant B and says so. This is the contract the
 production data planes leave implicit; here it is explicit, enforced, and
 measurable.
 

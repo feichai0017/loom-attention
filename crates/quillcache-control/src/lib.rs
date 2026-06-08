@@ -1,10 +1,11 @@
 use quillcache_core::{
     BlockRemovedEvent, BlockStoredEvent, CacheResidency, CacheTier, EngineEndpoint,
     ExternalKvBlockKey, IdentityScope, IndexBackend, KvBlockKey, KvEvent, KvEventBatch,
-    MemoryIndex, RequestShape, WorkerState,
+    MemoryIndex, RequestShape, ReuseViolation, WorkerState,
 };
 use quillcache_router::{GreedyStatePlaneRouter, RouteDecision, RouterError, RoutingPolicy};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -22,6 +23,23 @@ pub struct IngestSummary {
     pub removed_blocks: usize,
     pub cleared: bool,
     pub total_resident_blocks: usize,
+}
+
+/// What the identity guard did for one request: how many blocks were safe to
+/// reuse, and how many content-matching blocks were *refused* because they are
+/// resident only under a different identity (a naive content cache would have
+/// served them — see `quillcache_core::ReuseViolation`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReuseAudit {
+    /// Request blocks whose exact identity is resident — safe to reuse.
+    pub safe_reusable: usize,
+    /// Request blocks whose content is resident only under a *different*
+    /// identity — refused.
+    pub refused_unsafe: usize,
+    pub refused_cross_tenant: usize,
+    pub refused_cross_adapter: usize,
+    pub refused_cross_model: usize,
+    pub refused_cross_tokenizer: usize,
 }
 
 /// Translate a batch of engine KV events into residency updates against any
@@ -227,6 +245,50 @@ impl ControlPlane {
         ingest_batch(self.residency.as_mut(), batch, &self.engines)
     }
 
+    /// Audit identity-governed safe reuse for a request against current
+    /// residency: which blocks are safe to reuse, and which content-matching
+    /// blocks are refused because they belong to another identity. The router
+    /// already only reuses on exact identity (`KvBlockKey` equality), so this
+    /// never *changes* a decision — it makes the guard's refusals observable, so
+    /// the online path can report the unsafe reuse it prevented (the same
+    /// property the `safe-reuse` experiment measures offline).
+    pub fn audit_reuse(&self, request: &RequestShape) -> ReuseAudit {
+        let snapshot = self.residency.snapshot();
+        let mut by_content: HashMap<&str, Vec<&KvBlockKey>> = HashMap::new();
+        for residency in &snapshot {
+            by_content
+                .entry(residency.key.block_hash.as_str())
+                .or_default()
+                .push(&residency.key);
+        }
+
+        let mut audit = ReuseAudit::default();
+        for block in &request.blocks {
+            let Some(resident_keys) = by_content.get(block.block_hash.as_str()) else {
+                continue;
+            };
+            let scope = IdentityScope::from_key(block);
+            if resident_keys.iter().any(|key| scope.matches(key)) {
+                audit.safe_reusable += 1;
+                continue;
+            }
+            // Content is resident, but only under other identities: refused.
+            if let Some(violation) = resident_keys
+                .iter()
+                .find_map(|key| scope.reuse_violation(key))
+            {
+                audit.refused_unsafe += 1;
+                match violation {
+                    ReuseViolation::Tenant => audit.refused_cross_tenant += 1,
+                    ReuseViolation::Adapter => audit.refused_cross_adapter += 1,
+                    ReuseViolation::Model => audit.refused_cross_model += 1,
+                    ReuseViolation::Tokenizer => audit.refused_cross_tokenizer += 1,
+                }
+            }
+        }
+        audit
+    }
+
     pub fn engine(&self, id: &str) -> Option<&EngineEndpoint> {
         self.engines.iter().find(|engine| engine.id == id)
     }
@@ -396,6 +458,62 @@ mod tests {
         let second = control.route(&request).unwrap();
         assert_eq!(second.worker_id, first.worker_id);
         assert_eq!(second.local_hits.len(), 1);
+    }
+
+    #[test]
+    fn audit_reuse_flags_cross_identity_content_as_refused() {
+        let mut control = ControlPlane::new(vec![engine()]);
+
+        // Tenant A places a block with content hash "shared".
+        let a_block = KvBlockKey::external_hash(ExternalKvBlockKey {
+            model_id: "Qwen/Qwen3-0.6B".to_string(),
+            tokenizer_id: "Qwen/Qwen3-0.6B".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant-a".to_string(),
+            prefix_hash: "root".to_string(),
+            block_hash: "shared".to_string(),
+            block_index: 0,
+            token_count: 64,
+        });
+        let a_request = RequestShape {
+            id: "a".to_string(),
+            model_id: "Qwen/Qwen3-0.6B".to_string(),
+            tokenizer_id: "Qwen/Qwen3-0.6B".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant-a".to_string(),
+            blocks: vec![a_block],
+            estimated_decode_tokens: 16,
+            slo: SloTarget::default(),
+        };
+        control.observe_placement("vllm-a", &a_request, 1024);
+
+        // Tenant A re-requesting the same content: a safe reuse.
+        let a_audit = control.audit_reuse(&a_request);
+        assert_eq!(a_audit.safe_reusable, 1);
+        assert_eq!(a_audit.refused_unsafe, 0);
+
+        // Tenant B with the SAME content hash: content is resident only under
+        // tenant A, so the guard refuses it as a cross-tenant privacy leak.
+        let b_request = RequestShape {
+            id: "b".to_string(),
+            tenant_id: "tenant-b".to_string(),
+            blocks: vec![KvBlockKey::external_hash(ExternalKvBlockKey {
+                model_id: "Qwen/Qwen3-0.6B".to_string(),
+                tokenizer_id: "Qwen/Qwen3-0.6B".to_string(),
+                adapter_id: None,
+                tenant_id: "tenant-b".to_string(),
+                prefix_hash: "root".to_string(),
+                block_hash: "shared".to_string(),
+                block_index: 0,
+                token_count: 64,
+            })],
+            ..a_request.clone()
+        };
+        let b_audit = control.audit_reuse(&b_request);
+        assert_eq!(b_audit.safe_reusable, 0);
+        assert_eq!(b_audit.refused_unsafe, 1);
+        assert_eq!(b_audit.refused_cross_tenant, 1);
+        assert_eq!(b_audit.refused_cross_adapter, 0);
     }
 
     #[test]

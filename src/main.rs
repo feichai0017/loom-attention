@@ -234,6 +234,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "cost of safety: {:.1} ms prefill to avoid {} unsafe serves",
                     report.guard_recompute_ms, report.unsafe_blocks_avoided
                 );
+                println!(
+                    "safety overhead: {:.1}% of reuse work (≈0 when same-identity reuse dominates)",
+                    report.safety_overhead_pct
+                );
             }
         }
     }

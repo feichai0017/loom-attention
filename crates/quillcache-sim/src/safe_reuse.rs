@@ -82,6 +82,10 @@ pub struct SafeReuseReport {
     pub unsafe_blocks_avoided: u64,
     /// Prefill cost of the guard's forced recomputes, in milliseconds.
     pub guard_recompute_ms: f64,
+    /// Guard overhead = forced recomputes / (forced recomputes + safe reuses).
+    /// Small when same-identity reuse dominates — the realistic case — so safety
+    /// is near-free; large only on adversarial all-collision workloads.
+    pub safety_overhead_pct: f64,
 }
 
 fn identity(model: &str, tok: &str, adapter: Option<String>, tenant: String) -> IdentityScope {
@@ -149,6 +153,7 @@ pub fn run_safe_reuse(config: SafeReuseConfig) -> SafeReuseReport {
         guard_recomputes: 0,
         unsafe_blocks_avoided: 0,
         guard_recompute_ms: 0.0,
+        safety_overhead_pct: 0.0,
     };
 
     let repeats = config.repeats.max(1);
@@ -205,6 +210,12 @@ pub fn run_safe_reuse(config: SafeReuseConfig) -> SafeReuseReport {
     r.unsafe_blocks_avoided = r.naive_unsafe;
     r.guard_recompute_ms =
         r.guard_recomputes as f64 * cost.prefill_cost_us(config.block_tokens) as f64 / 1_000.0;
+    let guard_vs_reuse = r.guard_recomputes + r.safe_reuses;
+    r.safety_overhead_pct = if guard_vs_reuse > 0 {
+        100.0 * r.guard_recomputes as f64 / guard_vs_reuse as f64
+    } else {
+        0.0
+    };
     r
 }
 
@@ -270,5 +281,31 @@ mod tests {
         assert_eq!(r.guard_recompute_ms, 0.0);
         let units = u64::from(config.prefix_blocks * config.distinct_prefixes);
         assert_eq!(r.safe_reuses, u64::from(config.repeats - 1) * units);
+    }
+
+    #[test]
+    fn safety_is_near_free_when_same_identity_reuse_dominates() {
+        // Realistic: a handful of identities, mostly the same one reusing a lot.
+        let realistic = run_safe_reuse(SafeReuseConfig {
+            distinct_prefixes: 50,
+            prefix_blocks: 8,
+            tenants: 2,
+            adapters: 1,
+            repeats: 40,
+            block_tokens: 64,
+        });
+        // Adversarial: every identity collides on every block (the default).
+        let adversarial = run_safe_reuse(SafeReuseConfig::default());
+
+        assert!(
+            realistic.safety_overhead_pct < 5.0,
+            "realistic overhead too high: {}%",
+            realistic.safety_overhead_pct
+        );
+        assert!(
+            adversarial.safety_overhead_pct > 25.0,
+            "adversarial overhead too low: {}%",
+            adversarial.safety_overhead_pct
+        );
     }
 }

@@ -93,6 +93,9 @@ struct GatewayRouteTrace {
     local_hits: usize,
     transfer_blocks: usize,
     recompute_blocks: usize,
+    /// Content-matching blocks the identity guard refused (resident only under a
+    /// different identity — a naive content cache would have served them).
+    reuse_refused: usize,
     estimated_ttft_us: u64,
     estimated_tpot_us: u64,
 }
@@ -199,6 +202,10 @@ async fn proxy_openai_path(
     let (engine, trace) = {
         let control = state.control.read().await;
         let decision = control.route(&request_shape)?;
+        // Identity guard: how many content-matching blocks we refused to reuse
+        // because they belong to another identity (the safety property, made
+        // observable on the live path).
+        let audit = control.audit_reuse(&request_shape);
         let engine = control
             .engine(&decision.worker_id)
             .cloned()
@@ -210,11 +217,20 @@ async fn proxy_openai_path(
             local_hits: decision.local_hits.len(),
             transfer_blocks: decision.transfers.len(),
             recompute_blocks: decision.recomputes.len(),
+            reuse_refused: audit.refused_unsafe,
             estimated_ttft_us: decision.estimated_ttft_us,
             estimated_tpot_us: decision.estimated_tpot_us,
         };
         (engine, trace)
     };
+
+    if trace.reuse_refused > 0 {
+        tracing::warn!(
+            request_id = %trace.request_id,
+            reuse_refused = trace.reuse_refused,
+            "identity guard refused unsafe cross-identity reuse"
+        );
+    }
 
     let target_url = format!("{}{}", engine.base_url.trim_end_matches('/'), path);
     tracing::info!(
@@ -268,6 +284,10 @@ async fn proxy_openai_path(
         .header(
             "x-quillcache-recompute-blocks",
             trace.recompute_blocks.to_string(),
+        )
+        .header(
+            "x-quillcache-reuse-refused",
+            trace.reuse_refused.to_string(),
         )
         .header(
             "x-quillcache-estimated-ttft-us",
