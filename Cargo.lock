@@ -1045,6 +1045,8 @@ dependencies = [
  "axum",
  "quillcache-control",
  "quillcache-core",
+ "quillcache-index-holt",
+ "quillcache-index-rocksdb",
  "quillcache-router",
  "reqwest",
  "serde",

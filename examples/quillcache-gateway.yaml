@@ -1,5 +1,10 @@
 # QuillCache gateway in front of a 2-vLLM fleet on Modal.
-# policy: prefix-affinity (cache-affine) | round-robin (spread) | least-loaded | greedy
+# policy: prefix-affinity | round-robin | least-loaded | slo-aware | session-affinity | greedy
+# index:  memory (default) | holt (persistent ART) | rocksdb (persistent LSM)
+#   A persistent index keeps fleet residency across gateway restarts. Build with
+#   the matching feature (`cargo run --features holt -- gateway ...`) and set:
+#   index: holt
+#   index_path: quillcache-residency
 bind: 127.0.0.1:8080
 policy: prefix-affinity
 engines:

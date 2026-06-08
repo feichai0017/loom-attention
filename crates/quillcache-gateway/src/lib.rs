@@ -6,8 +6,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use quillcache_control::{ControlPlane, IngestSummary};
 use quillcache_core::{
-    EngineEndpoint, ExternalKvBlockKey, KvBlockKey, KvEventBatch, MemoryIndex, RequestKvHints,
-    RequestShape, SloTarget,
+    EngineEndpoint, ExternalKvBlockKey, IndexBackend, KvBlockKey, KvEventBatch, MemoryIndex,
+    RequestKvHints, RequestShape, SloTarget,
 };
 use quillcache_router::{
     GreedyStatePlaneRouter, LeastLoadedRouter, PrefixAffinityRouter, RoundRobinRouter,
@@ -56,9 +56,19 @@ pub struct GatewayConfig {
     pub engines: Vec<EngineEndpoint>,
     /// Routing policy: "prefix-affinity" (cache-affine across the fleet),
     /// "round-robin" (spread baseline), "least-loaded", "slo-aware" (SLO as a
-    /// near-hard constraint, cache-affine within it), or "greedy" (default).
+    /// near-hard constraint), "session-affinity", or "greedy" (default).
     #[serde(default)]
     pub policy: Option<String>,
+    /// Residency index backend: "memory" (default, ephemeral), "holt"
+    /// (persistent ART), or "rocksdb" (persistent LSM). The persistent backends
+    /// need the matching build feature; otherwise the gateway warns and uses
+    /// memory. A persistent index keeps fleet residency across restarts.
+    #[serde(default)]
+    pub index: Option<String>,
+    /// On-disk path for a persistent index backend (default
+    /// `quillcache-residency`).
+    #[serde(default)]
+    pub index_path: Option<String>,
 }
 
 impl GatewayConfig {
@@ -109,13 +119,15 @@ pub async fn run_from_config_path(path: impl AsRef<Path>) -> Result<(), GatewayE
 pub async fn run(config: GatewayConfig) -> Result<(), GatewayError> {
     let policy = build_policy(config.policy.as_deref());
     let policy_name = policy.name().to_string();
-    let control =
-        ControlPlane::with_index_and_policy(config.engines, Box::new(MemoryIndex::new()), policy);
-    tracing::info!(policy = %policy_name, "routing policy selected");
+    let index = build_index(&config);
+    let index_name = index.name().to_string();
+    let control = ControlPlane::with_index_and_policy(config.engines, index, policy);
+    tracing::info!(policy = %policy_name, index = %index_name, "control plane configured");
     let state = GatewayState {
         control: Arc::new(RwLock::new(control)),
         client: Client::new(),
     };
+    let control = state.control.clone();
     let app = router(state);
     let listener = TcpListener::bind(config.bind)
         .await
@@ -125,9 +137,89 @@ pub async fn run(config: GatewayConfig) -> Result<(), GatewayError> {
         })?;
 
     tracing::info!(addr = %config.bind, "starting QuillCache gateway");
+    // Persist the residency index on shutdown so a persistent backend survives a
+    // restart (in-memory no-ops).
     axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            control.read().await.flush();
+            tracing::info!("flushed residency index on shutdown");
+        })
         .await
         .map_err(GatewayError::Serve)
+}
+
+/// Resolve when the process receives Ctrl-C or (on Unix) SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+}
+
+/// Build the residency index backend from config. Persistent backends are
+/// feature-gated; if the requested one is not compiled in (or fails to open),
+/// the gateway warns and falls back to the in-memory reference index, so a
+/// misconfigured backend degrades instead of failing to start.
+fn build_index(config: &GatewayConfig) -> Box<dyn IndexBackend> {
+    match config.index.as_deref().unwrap_or("memory") {
+        "memory" => Box::new(MemoryIndex::new()),
+        #[cfg(feature = "holt")]
+        "holt" => {
+            let path = config
+                .index_path
+                .clone()
+                .unwrap_or_else(|| "quillcache-residency".to_string());
+            match quillcache_index_holt::HoltIndex::open(&path) {
+                Ok(index) => {
+                    tracing::info!(path = %path, "persistent ART (Holt) residency index");
+                    Box::new(index)
+                }
+                Err(error) => {
+                    tracing::error!(?error, "failed to open Holt index; using in-memory");
+                    Box::new(MemoryIndex::new())
+                }
+            }
+        }
+        #[cfg(feature = "rocksdb")]
+        "rocksdb" => {
+            let path = config
+                .index_path
+                .clone()
+                .unwrap_or_else(|| "quillcache-residency".to_string());
+            match quillcache_index_rocksdb::RocksIndex::open(&path) {
+                Ok(index) => {
+                    tracing::info!(path = %path, "persistent LSM (RocksDB) residency index");
+                    Box::new(index)
+                }
+                Err(error) => {
+                    tracing::error!(?error, "failed to open RocksDB index; using in-memory");
+                    Box::new(MemoryIndex::new())
+                }
+            }
+        }
+        other => {
+            tracing::warn!(
+                backend = other,
+                "index backend unavailable (needs a build feature); using in-memory"
+            );
+            Box::new(MemoryIndex::new())
+        }
+    }
 }
 
 /// Build a routing policy from its config name (default: cache-aware greedy).
@@ -534,6 +626,25 @@ mod tests {
         assert!(value.get("quillcache").is_none());
         assert_eq!(shape.id, "req-a");
         assert_eq!(shape.blocks[0].block_hash, "h0");
+    }
+
+    #[test]
+    fn build_index_defaults_to_memory_and_degrades_gracefully() {
+        let base = GatewayConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            engines: vec![],
+            policy: None,
+            index: None,
+            index_path: None,
+        };
+        // No backend configured -> in-memory reference.
+        assert_eq!(build_index(&base).name(), "memory");
+        // An unavailable / uncompiled backend falls back to memory, not a panic.
+        let unknown = GatewayConfig {
+            index: Some("not-a-backend".to_string()),
+            ..base.clone()
+        };
+        assert_eq!(build_index(&unknown).name(), "memory");
     }
 
     #[test]

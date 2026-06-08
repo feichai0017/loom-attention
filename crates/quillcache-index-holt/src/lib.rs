@@ -313,6 +313,10 @@ impl IndexBackend for HoltIndex {
             .count()
     }
 
+    fn flush(&self) {
+        let _ = self.tree.checkpoint();
+    }
+
     fn persistent(&self) -> bool {
         true
     }

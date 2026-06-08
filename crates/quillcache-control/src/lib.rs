@@ -304,6 +304,13 @@ impl ControlPlane {
     pub fn residency(&self) -> &dyn IndexBackend {
         self.residency.as_ref()
     }
+
+    /// Persist the residency index (checkpoint a persistent backend; no-op for
+    /// in-memory). Call periodically and on shutdown so a persistent index
+    /// survives a restart.
+    pub fn flush(&self) {
+        self.residency.flush();
+    }
 }
 
 #[cfg(test)]

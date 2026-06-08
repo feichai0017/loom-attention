@@ -337,6 +337,10 @@ impl IndexBackend for RocksIndex {
         n
     }
 
+    fn flush(&self) {
+        let _ = self.db.flush_wal(true);
+    }
+
     fn persistent(&self) -> bool {
         true
     }

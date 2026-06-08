@@ -564,6 +564,12 @@ pub trait IndexBackend: std::fmt::Debug + Send + Sync {
     /// Drop the entire index.
     fn clear(&mut self);
 
+    /// Persist buffered state to disk (checkpoint the WAL / flush memtables). The
+    /// in-memory reference backend is a no-op; persistent backends override this.
+    /// The control plane calls it periodically and on graceful shutdown so a
+    /// persistent residency index survives a restart.
+    fn flush(&self) {}
+
     /// Full residency snapshot, for debugging and for routers that consume a
     /// slice of residency.
     fn snapshot(&self) -> Vec<CacheResidency>;

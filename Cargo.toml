@@ -58,7 +58,8 @@ tracing-subscriber = { workspace = true }
 [features]
 # Optional RocksDB (LSM) index backend. Off by default so `cargo install
 # quillcache` stays light and the core CI job needs no C++/libclang toolchain.
-rocksdb = ["dep:quillcache-index-rocksdb"]
+rocksdb = ["dep:quillcache-index-rocksdb", "quillcache-gateway/rocksdb"]
 # Optional Holt (persistent ART) index backend. Pure Rust; off by default to keep
-# the installed binary minimal.
-holt = ["dep:quillcache-index-holt"]
+# the installed binary minimal. Also lets the online gateway back its residency
+# index with Holt (`index: holt` in the gateway config).
+holt = ["dep:quillcache-index-holt", "quillcache-gateway/holt"]

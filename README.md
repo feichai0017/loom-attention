@@ -241,6 +241,8 @@ cargo run -- plan
 
 # Online mode: OpenAI-compatible gateway in front of real vLLM/SGLang workers.
 cargo run -- gateway --config examples/quillcache-gateway.yaml
+# ...backed by a persistent ART (Holt) residency index that survives restarts:
+cargo run --features holt -- gateway --config examples/quillcache-gateway.yaml  # set index: holt
 
 # Tests
 cargo test --workspace
@@ -269,6 +271,7 @@ exact block hashes while keeping the upstream request clean. See
 - ✅ **Closed online residency loop**: the gateway records inferred placement from its own routing decisions and derives prefix blocks from the prompt, so cache-aware routing works end-to-end without a KV-events bridge (verified live: a 2nd request sharing a system prompt routes to the same engine with a real local hit). KV events (Tier 2) upgrade inferred residency to ground truth.
 - ✅ Vendor-neutral `/v1/kv-events` ingest (vLLM BlockStored / BlockRemoved / AllBlocksCleared shape).
 - ✅ Single `IndexBackend` seam with an in-memory reference backend + identity-aware prefix scan.
+- ✅ **Persistent residency index in the online gateway** (`index: holt` / `rocksdb`): the control plane can be backed by Holt (persistent ART), so fleet residency **survives a gateway restart** — verified live (2 blocks placed → SIGTERM flush → reopen → 2 blocks recovered, no replay of events).
 - ✅ Pluggable `RoutingPolicy`: load-only baseline, cache-aware greedy, prefix-affinity, round-robin, SLO-aware (SLO as a near-hard constraint), and session-affine (pin a multi-turn/agent session to the engine accumulating its KV).
 - ✅ Experiment harness comparing policies × backends on one trace.
 - ✅ Holt (ART) and RocksDB (LSM) index backends + `bench-index` ART-vs-LSM comparison.
