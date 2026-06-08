@@ -9,8 +9,11 @@
 QuillCache is a **vendor-neutral KV cache control plane and evaluation platform**
 for LLM inference. It does not run models and it does not move KV tensors. It
 sits in front of / beside real engines (vLLM, SGLang) and the KV data plane
-(LMCache, NVIDIA Dynamo KVBM) and owns the *metadata and the decisions*: block
-identity, residency, routing, and reuse / transfer / recompute / evict policy.
+(LMCache, NVIDIA Dynamo KVBM, Tencent FlexKV) and owns the *metadata and the
+decisions*: block identity, residency, routing, and reuse / transfer / recompute
+/ evict policy. Those data planes move and store KV tensors; QuillCache is the
+neutral layer **above** them — it can drive and compare them, and it enforces the
+one thing they leave implicit: **identity-governed safe reuse** (below).
 
 It is built as a **research instrument**: engines, routing policies, and index
 backends are all pluggable, so you can replay one workload across many
@@ -21,7 +24,7 @@ combinations and measure them apples-to-apples.
 | It IS | It is NOT |
 | --- | --- |
 | a gateway in front of real engines | a new vLLM / SGLang (no kernels, no model execution) |
-| a residency index fed by real KV events | a new LMCache (not a KV **tensor** data plane) |
+| a residency index fed by real KV events | a new LMCache / FlexKV (not a KV **tensor** data plane) |
 | a policy engine (route / reuse / recompute / pin / evict) | a new Dynamo KVBM (not a distributed block memory manager) |
 | a research instrument comparing policies **and** index backends | a paper-only simulator (it connects to real engines) |
 | the experiment substrate for Holt / RocksDB / Memory / FS indexes | a store for large KV **tensors** |
@@ -29,11 +32,11 @@ combinations and measure them apples-to-apples.
 ## Layering
 
 ```text
-vLLM / SGLang     = inference engines (run the model, own live KV tensors)
-LMCache / KVBM    = KV tensor data plane / offload backend
-QuillCache        = control plane + research platform   <-- this repo
-Holt              = persistent ART index backend
-RocksDB           = LSM index baseline
+vLLM / SGLang        = inference engines (run the model, own live KV tensors)
+LMCache/KVBM/FlexKV  = KV tensor data plane / offload backend
+QuillCache           = control plane + research platform   <-- this repo
+Holt                 = persistent ART index backend
+RocksDB              = LSM index baseline
 ```
 
 QuillCache holds **identity + residency metadata** and makes **decisions**. The
@@ -82,6 +85,41 @@ mode runs one chosen combination in front of real engines.
 
 The ART-vs-LSM line below is about the **index backend**, not the data plane.
 Holt stores the *catalog/index*, not the KV tensors.
+
+## Identity-governed safe reuse (the spike)
+
+A KV block's **content hash** is computed from its tokens, so the same tokens
+produce the same hash — *regardless of which tenant sent them, which LoRA adapter
+is active, or which model/tokenizer version is loaded*. But the KV **tensors**
+depend on all of those. So a cache that reuses on content hash alone — which is
+what data-plane caches (FlexKV / LMCache / KVBM) key on — will serve blocks it
+must not:
+
+- across **tenants** → a **privacy leak** (one tenant's cached state served to another),
+- across **adapters / models / tokenizers** → a **correctness error** (numerically wrong KV).
+
+QuillCache makes the reuse contract explicit: every block carries an
+`IdentityScope` (model · tokenizer · adapter · tenant), and reuse is allowed only
+when it matches (`quillcache_core::ReuseViolation` classifies why it doesn't).
+The `safe-reuse` experiment quantifies the gap on a collision-heavy workload —
+one popular prefix shared across many identities, i.e. the multi-tenant
+shared-system-prompt / shared-RAG-doc case:
+
+```
+quillcache safe-reuse           # 12 identities share each prefix
+```
+
+| policy | content-hash hits | unsafe served | of which | safe reuse kept |
+| --- | --- | --- | --- | --- |
+| naive (content hash only) | 9200 | **8800 (95.7%)** | 5600 cross-tenant leaks + 3200 cross-adapter errors | — |
+| **QuillCache (identity guard)** | — | **0** | — | 4800 |
+
+The guard eliminates **all** unsafe reuse while preserving safe same-identity
+reuse, at a measured cost (here ~12.7 s of prefill recompute to avoid 8800 unsafe
+serves). Push it to a privacy-heavy mix (`--tenants 32 --adapters 0`) and **98.4%**
+of the naive cache's hits are cross-tenant leaks. This is the contract the
+production data planes leave implicit; here it is explicit, enforced, and
+measurable.
 
 ## Why ART (Holt) vs RocksDB (LSM)
 
@@ -152,12 +190,12 @@ fix.
 
 | Package | Role |
 | --- | --- |
-| `quillcache` | CLI: `simulate`, `plan`, `gateway`. |
+| `quillcache` | CLI: `simulate`, `bench-index`, `safe-reuse`, `plan`, `gateway`. |
 | `quillcache-core` | `KvBlockKey` identity, `CacheResidency`, cost model, and the `IndexBackend` trait + `MemoryIndex` reference backend. |
 | `quillcache-router` | `RoutingPolicy` trait; `GreedyStatePlaneRouter` (cache-aware) and `LeastLoadedRouter` (baseline). |
 | `quillcache-control` | `ControlPlane` and the backend-agnostic `ingest_batch` (KV events → residency). |
 | `quillcache-gateway` | OpenAI-compatible proxy + `/v1/kv-events` ingest + `/v1/state`. |
-| `quillcache-sim` | Experiment-mode harness: replay a trace over any policy × any backend. |
+| `quillcache-sim` | Experiment-mode harness: replay a trace over any policy × any backend; `bench-index` and `safe-reuse` experiments. |
 | `quillcache-index-rocksdb` | RocksDB (LSM) `IndexBackend` (optional `rocksdb` feature; needs a C++ toolchain). |
 | `quillcache-index-holt` | Holt (persistent ART) `IndexBackend` (optional `holt` feature; pure Rust). |
 
@@ -174,6 +212,10 @@ cargo run -- simulate --json
 cargo run --features "rocksdb holt" -- bench-index --backend memory
 cargo run --features "rocksdb holt" -- bench-index --backend rocksdb
 cargo run --features "rocksdb holt" -- bench-index --backend holt
+
+# Identity-governed safe reuse: naive content-hash reuse vs the identity guard.
+cargo run -- safe-reuse
+cargo run -- safe-reuse --tenants 32 --adapters 0   # privacy-heavy mix
 
 # Print the research plan / build order.
 cargo run -- plan
@@ -211,6 +253,7 @@ exact block hashes while keeping the upstream request clean. See
 - ✅ Experiment harness comparing policies × backends on one trace.
 - ✅ Holt (ART) and RocksDB (LSM) index backends + `bench-index` ART-vs-LSM comparison.
 - ✅ Eviction-churn benchmark + O(matches) `remove_block` via a secondary block_hash index (100–300× faster eviction on the persistent backends).
+- ✅ Identity-governed safe reuse: `ReuseViolation` classifier + `safe-reuse` experiment quantifying the cross-tenant / cross-adapter unsafe reuse a content-hash cache would serve (and that the guard eliminates).
 - ⏳ Real-vLLM connect (M3): Modal deploy + KV-events bridge + trace runner written (`deploy/` · `bridge/` · `bench/` · `docs/m3-real-vllm.md`); live run pending a cloud GPU. SGLang connector later.
 
 ## Roadmap
@@ -219,7 +262,7 @@ exact block hashes while keeping the upstream request clean. See
 2. SLO-aware and session/DAG-aware routing policies.
 3. Real vLLM/SGLang KV-event connectors end-to-end; chat / RAG / agent traces.
 4. Tiered placement and eviction across HBM / DRAM / SSD / remote.
-5. Identity-governed safe reuse: refuse unsafe reuse and quantify its cost.
+5. ✅ Identity-governed safe reuse: refuse unsafe reuse and quantify its cost (`safe-reuse`) — done; next: enforce it inline in the gateway and add cross-model/tokenizer/quant axes.
 6. Baselines: engine-local prefix caching, LMCache-style cache, Mooncake-style pool.
 
 ## Non-goals

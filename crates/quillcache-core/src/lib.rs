@@ -434,10 +434,69 @@ impl IdentityScope {
     /// exactly (including absence): a LoRA-adapted block is not reusable by a
     /// base-model request, and vice versa.
     pub fn matches(&self, key: &KvBlockKey) -> bool {
-        self.model_id == key.model_id
-            && self.tokenizer_id == key.tokenizer_id
-            && self.adapter_id == key.adapter_id
-            && self.tenant_id == key.tenant_id
+        self.reuse_violation(key).is_none()
+    }
+
+    /// Classify why a *content-matching* block (same `block_hash`) is unsafe to
+    /// reuse for a request in this scope, or `None` when identity agrees and
+    /// reuse is safe. Content hashes collide across identities — the same tokens
+    /// produce the same `block_hash` — but the KV tensors do not, so a control
+    /// plane that reuses on content alone serves wrong or leaked state. Checked
+    /// in priority order (a block can violate on several axes at once).
+    pub fn reuse_violation(&self, key: &KvBlockKey) -> Option<ReuseViolation> {
+        if self.model_id != key.model_id {
+            Some(ReuseViolation::Model)
+        } else if self.tokenizer_id != key.tokenizer_id {
+            Some(ReuseViolation::Tokenizer)
+        } else if self.adapter_id != key.adapter_id {
+            Some(ReuseViolation::Adapter)
+        } else if self.tenant_id != key.tenant_id {
+            Some(ReuseViolation::Tenant)
+        } else {
+            None
+        }
+    }
+}
+
+/// Why a content-hash-matching KV block is unsafe to reuse across an identity
+/// boundary. The first three are **correctness** violations (the cached KV is
+/// numerically wrong for the request); `Tenant` is a **privacy** violation (the
+/// KV is valid but belongs to another tenant, so serving it leaks their state).
+/// This is the contract data-plane caches (FlexKV / LMCache / KVBM) leave
+/// implicit; QuillCache makes it explicit and measurable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReuseViolation {
+    /// Different model weights — attention output, and thus KV, differs.
+    Model,
+    /// Different tokenizer — the same text can tokenize differently, so the
+    /// "same" prefix is not actually the same token sequence.
+    Tokenizer,
+    /// Different LoRA adapter — adapted attention changes the KV tensors even
+    /// for identical tokens and base weights.
+    Adapter,
+    /// Different tenant — the KV is numerically valid but reusing it serves one
+    /// tenant's cached state to another (a prefix-cache privacy leak).
+    Tenant,
+}
+
+impl ReuseViolation {
+    /// A correctness violation yields *wrong* output; a privacy violation yields
+    /// *leaked* output. They are mitigated and measured differently.
+    pub fn is_correctness(self) -> bool {
+        matches!(self, Self::Model | Self::Tokenizer | Self::Adapter)
+    }
+
+    pub fn is_privacy(self) -> bool {
+        matches!(self, Self::Tenant)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "cross_model",
+            Self::Tokenizer => "cross_tokenizer",
+            Self::Adapter => "cross_adapter",
+            Self::Tenant => "cross_tenant",
+        }
     }
 }
 
@@ -700,6 +759,51 @@ mod tests {
 
     fn mem_block(prefix: &str, hash: &str, idx: u32) -> KvBlockKey {
         KvBlockKey::new("m", "t", "ten", prefix, hash, idx, 64)
+    }
+
+    #[test]
+    fn reuse_violation_classifies_identity_mismatch() {
+        let scope = IdentityScope {
+            model_id: "m".into(),
+            tokenizer_id: "t".into(),
+            adapter_id: Some("lora-a".into()),
+            tenant_id: "tenant-1".into(),
+        };
+        let same = KvBlockKey {
+            adapter_id: Some("lora-a".into()),
+            ..KvBlockKey::new("m", "t", "tenant-1", "p", "b", 0, 64)
+        };
+        assert_eq!(scope.reuse_violation(&same), None); // identical identity: safe
+        assert!(scope.matches(&same));
+
+        // Same content (block hash) but a different tenant: a privacy leak.
+        let other_tenant = KvBlockKey {
+            adapter_id: Some("lora-a".into()),
+            ..KvBlockKey::new("m", "t", "tenant-2", "p", "b", 0, 64)
+        };
+        assert_eq!(
+            scope.reuse_violation(&other_tenant),
+            Some(ReuseViolation::Tenant)
+        );
+        assert!(scope.reuse_violation(&other_tenant).unwrap().is_privacy());
+
+        // Different adapter: a correctness error (priority over tenant).
+        let other_adapter = KvBlockKey::new("m", "t", "tenant-2", "p", "b", 0, 64); // adapter None
+        assert_eq!(
+            scope.reuse_violation(&other_adapter),
+            Some(ReuseViolation::Adapter)
+        );
+        assert!(scope
+            .reuse_violation(&other_adapter)
+            .unwrap()
+            .is_correctness());
+
+        // Different model outranks everything else.
+        let other_model = KvBlockKey::new("m2", "t", "tenant-1", "p", "b", 0, 64);
+        assert_eq!(
+            scope.reuse_violation(&other_model),
+            Some(ReuseViolation::Model)
+        );
     }
 
     #[test]
