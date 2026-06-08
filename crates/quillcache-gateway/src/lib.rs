@@ -4,10 +4,11 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use quillcache_control::{ControlPlane, IngestSummary};
+use quillcache_control::{ControlPlane, IngestSummary, PlanAction, RequestPlan, ServingMode};
 use quillcache_core::{
-    EngineEndpoint, ExternalKvBlockKey, IndexBackend, KvBlockKey, KvEventBatch, MemoryIndex,
-    RequestKvHints, RequestShape, SloTarget,
+    DataPlane, DataPlaneAction, EngineEndpoint, ExternalKvBlockKey, IndexBackend, KvBlockKey,
+    KvEventBatch, MemoryIndex, NoDataPlane, RequestKvHints, RequestShape, SloTarget,
+    TieredDataPlane, TieredDataPlaneConfig,
 };
 use quillcache_router::{
     GreedyStatePlaneRouter, LeastLoadedRouter, PrefixAffinityRouter, RoundRobinRouter,
@@ -22,7 +23,7 @@ use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -46,6 +47,8 @@ pub enum GatewayError {
         addr: SocketAddr,
         source: std::io::Error,
     },
+    #[error("action_sink kind=http requires url")]
+    ActionSinkMissingUrl,
     #[error("gateway server failed: {0}")]
     Serve(std::io::Error),
 }
@@ -69,6 +72,56 @@ pub struct GatewayConfig {
     /// `quillcache-residency`).
     #[serde(default)]
     pub index_path: Option<String>,
+    /// Runtime KV tensor data-plane adapter. `none` keeps the previous inferred
+    /// placement behavior; `tiered` enables an in-process HBM/DRAM/SSD control
+    /// plane that performs real admission, promotion, demotion, and eviction.
+    #[serde(default)]
+    pub data_plane: Option<DataPlaneConfig>,
+    /// Optional synchronous action sink. `http` posts planner/data-plane actions
+    /// to an external adapter, for example vLLM kv_transfer, SGLang/LMCache, or
+    /// a Dynamo KVBM bridge.
+    #[serde(default)]
+    pub action_sink: Option<ActionSinkConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataPlaneConfig {
+    #[serde(default = "default_data_plane_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub hbm_capacity_bytes: Option<u64>,
+    #[serde(default)]
+    pub cpu_dram_capacity_bytes: Option<u64>,
+    #[serde(default)]
+    pub local_ssd_capacity_bytes: Option<u64>,
+}
+
+fn default_data_plane_kind() -> String {
+    "none".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionSinkConfig {
+    #[serde(default = "default_action_sink_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default = "default_action_sink_fail_open")]
+    pub fail_open: bool,
+    #[serde(default = "default_action_sink_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_action_sink_kind() -> String {
+    "none".to_string()
+}
+
+fn default_action_sink_fail_open() -> bool {
+    true
+}
+
+fn default_action_sink_timeout_ms() -> u64 {
+    250
 }
 
 impl GatewayConfig {
@@ -94,21 +147,163 @@ impl GatewayConfig {
 struct GatewayState {
     control: Arc<RwLock<ControlPlane>>,
     client: Client,
+    action_sink: Option<ActionSink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayRouteTrace {
+    pub request_id: String,
+    pub mode: ServingMode,
+    pub engine_id: String,
+    pub prefill_engine_id: Option<String>,
+    pub decode_engine_id: String,
+    pub planner_actions: usize,
+    pub reusable_blocks: usize,
+    pub local_hits: usize,
+    pub transfer_blocks: usize,
+    pub recompute_blocks: usize,
+    /// Content-matching blocks the identity guard refused (resident only under a
+    /// different identity — a naive content cache would have served them).
+    pub reuse_refused: usize,
+    pub estimated_ttft_us: u64,
+    pub estimated_tpot_us: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ActionSink {
+    url: String,
+    fail_open: bool,
+    timeout: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct GatewayRouteTrace {
-    request_id: String,
-    engine_id: String,
-    reusable_blocks: usize,
-    local_hits: usize,
-    transfer_blocks: usize,
-    recompute_blocks: usize,
-    /// Content-matching blocks the identity guard refused (resident only under a
-    /// different identity — a naive content cache would have served them).
-    reuse_refused: usize,
-    estimated_ttft_us: u64,
-    estimated_tpot_us: u64,
+struct ActionSinkSnapshot {
+    kind: String,
+    url: Option<String>,
+    fail_open: bool,
+    timeout_ms: u64,
+}
+
+impl ActionSinkSnapshot {
+    fn disabled() -> Self {
+        Self {
+            kind: "none".to_string(),
+            url: None,
+            fail_open: true,
+            timeout_ms: 0,
+        }
+    }
+}
+
+impl ActionSink {
+    fn snapshot(&self) -> ActionSinkSnapshot {
+        ActionSinkSnapshot {
+            kind: "http".to_string(),
+            url: Some(self.url.clone()),
+            fail_open: self.fail_open,
+            timeout_ms: self.timeout.as_millis() as u64,
+        }
+    }
+
+    async fn publish(
+        &self,
+        client: &Client,
+        event: &ActionSinkEvent,
+    ) -> Result<(), reqwest::Error> {
+        client
+            .post(&self.url)
+            .timeout(self.timeout)
+            .json(event)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionSinkPhase {
+    Planned,
+    Committed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionSinkPlan {
+    pub mode: ServingMode,
+    pub execution_worker_id: String,
+    pub prefill_worker_id: Option<String>,
+    pub decode_worker_id: String,
+    pub actions: Vec<PlanAction>,
+}
+
+impl From<&RequestPlan> for ActionSinkPlan {
+    fn from(plan: &RequestPlan) -> Self {
+        Self {
+            mode: plan.mode,
+            execution_worker_id: plan.execution_worker_id.clone(),
+            prefill_worker_id: plan.prefill_worker_id.clone(),
+            decode_worker_id: plan.decode_worker_id.clone(),
+            actions: plan.actions.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionSinkEvent {
+    pub schema_version: u32,
+    pub phase: ActionSinkPhase,
+    pub openai_path: String,
+    pub request: RequestShape,
+    pub route: GatewayRouteTrace,
+    pub plan: ActionSinkPlan,
+    pub cache_actions: Vec<DataPlaneAction>,
+}
+
+impl ActionSinkEvent {
+    pub fn new(
+        phase: ActionSinkPhase,
+        openai_path: &str,
+        request: &RequestShape,
+        route: &GatewayRouteTrace,
+        plan: ActionSinkPlan,
+        cache_actions: Vec<DataPlaneAction>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            phase,
+            openai_path: openai_path.to_string(),
+            request: request.clone(),
+            route: route.clone(),
+            plan,
+            cache_actions,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionSinkDelivery {
+    Disabled,
+    Sent,
+    Failed,
+}
+
+impl ActionSinkDelivery {
+    fn as_header(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Sent => "sent",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Failed, _) | (_, Self::Failed) => Self::Failed,
+            (Self::Sent, _) | (_, Self::Sent) => Self::Sent,
+            _ => Self::Disabled,
+        }
+    }
 }
 
 pub async fn run_from_config_path(path: impl AsRef<Path>) -> Result<(), GatewayError> {
@@ -121,11 +316,26 @@ pub async fn run(config: GatewayConfig) -> Result<(), GatewayError> {
     let policy_name = policy.name().to_string();
     let index = build_index(&config);
     let index_name = index.name().to_string();
-    let control = ControlPlane::with_index_and_policy(config.engines, index, policy);
-    tracing::info!(policy = %policy_name, index = %index_name, "control plane configured");
+    let data_plane = build_data_plane(config.data_plane.as_ref());
+    let data_plane_name = data_plane.name().to_string();
+    let action_sink = build_action_sink(config.action_sink.as_ref())?;
+    let action_sink_name = action_sink
+        .as_ref()
+        .map(|sink| sink.snapshot().kind)
+        .unwrap_or_else(|| "none".to_string());
+    let control = ControlPlane::with_index_and_policy(config.engines, index, policy)
+        .with_data_plane(data_plane);
+    tracing::info!(
+        policy = %policy_name,
+        index = %index_name,
+        data_plane = %data_plane_name,
+        action_sink = %action_sink_name,
+        "control plane configured"
+    );
     let state = GatewayState {
         control: Arc::new(RwLock::new(control)),
         client: Client::new(),
+        action_sink,
     };
     let control = state.control.clone();
     let app = router(state);
@@ -222,6 +432,59 @@ fn build_index(config: &GatewayConfig) -> Box<dyn IndexBackend> {
     }
 }
 
+fn build_data_plane(config: Option<&DataPlaneConfig>) -> Box<dyn DataPlane> {
+    let Some(config) = config else {
+        return Box::new(NoDataPlane);
+    };
+    match config.kind.as_str() {
+        "none" => Box::new(NoDataPlane),
+        "tiered" => {
+            let defaults = TieredDataPlaneConfig::default();
+            Box::new(TieredDataPlane::new(TieredDataPlaneConfig {
+                hbm_capacity_bytes: config
+                    .hbm_capacity_bytes
+                    .unwrap_or(defaults.hbm_capacity_bytes),
+                cpu_dram_capacity_bytes: config
+                    .cpu_dram_capacity_bytes
+                    .unwrap_or(defaults.cpu_dram_capacity_bytes),
+                local_ssd_capacity_bytes: config
+                    .local_ssd_capacity_bytes
+                    .unwrap_or(defaults.local_ssd_capacity_bytes),
+            }))
+        }
+        other => {
+            tracing::warn!(data_plane = other, "unknown data plane; using none");
+            Box::new(NoDataPlane)
+        }
+    }
+}
+
+fn build_action_sink(
+    config: Option<&ActionSinkConfig>,
+) -> Result<Option<ActionSink>, GatewayError> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    match config.kind.as_str() {
+        "none" => Ok(None),
+        "http" => {
+            let url = config
+                .url
+                .clone()
+                .ok_or(GatewayError::ActionSinkMissingUrl)?;
+            Ok(Some(ActionSink {
+                url,
+                fail_open: config.fail_open,
+                timeout: Duration::from_millis(config.timeout_ms),
+            }))
+        }
+        other => {
+            tracing::warn!(action_sink = other, "unknown action sink; disabling");
+            Ok(None)
+        }
+    }
+}
+
 /// Build a routing policy from its config name (default: cache-aware greedy).
 fn build_policy(name: Option<&str>) -> Box<dyn RoutingPolicy> {
     match name.unwrap_or("greedy") {
@@ -256,6 +519,9 @@ async fn state_snapshot(State(state): State<GatewayState>) -> impl IntoResponse 
         "index": control.residency().metrics(),
         "index_backend": control.residency().name(),
         "data_plane": control.data_plane().name(),
+        "data_plane_metrics": control.data_plane().metrics(),
+        "data_plane_residency": control.data_plane().snapshot(),
+        "action_sink": state.action_sink.as_ref().map(ActionSink::snapshot).unwrap_or_else(ActionSinkSnapshot::disabled),
         "resident_blocks": control.residency().len(),
         "residency": control.residency().snapshot(),
     }))
@@ -296,20 +562,25 @@ async fn proxy_openai_path(
     let request_shape = request_shape_from_payload(&mut payload);
     let clean_body = serde_json::to_vec(&payload)?;
 
-    let (engine, trace) = {
+    let (engine, trace, action_plan) = {
         let control = state.control.read().await;
-        let decision = control.route(&request_shape)?;
+        let plan = control.plan(&request_shape)?;
+        let decision = &plan.route;
         // Identity guard: how many content-matching blocks we refused to reuse
         // because they belong to another identity (the safety property, made
         // observable on the live path).
         let audit = control.audit_reuse(&request_shape);
         let engine = control
-            .engine(&decision.worker_id)
+            .engine(&plan.execution_worker_id)
             .cloned()
-            .ok_or_else(|| GatewayHttpError::MissingEngine(decision.worker_id.clone()))?;
+            .ok_or_else(|| GatewayHttpError::MissingEngine(plan.execution_worker_id.clone()))?;
         let trace = GatewayRouteTrace {
             request_id: decision.request_id.clone(),
-            engine_id: decision.worker_id.clone(),
+            mode: plan.mode,
+            engine_id: plan.execution_worker_id.clone(),
+            prefill_engine_id: plan.prefill_worker_id.clone(),
+            decode_engine_id: plan.decode_worker_id.clone(),
+            planner_actions: plan.actions.len(),
             reusable_blocks: decision.reusable_blocks(),
             local_hits: decision.local_hits.len(),
             transfer_blocks: decision.transfers.len(),
@@ -318,7 +589,8 @@ async fn proxy_openai_path(
             estimated_ttft_us: decision.estimated_ttft_us,
             estimated_tpot_us: decision.estimated_tpot_us,
         };
-        (engine, trace)
+        let action_plan = ActionSinkPlan::from(&plan);
+        (engine, trace, action_plan)
     };
 
     if trace.reuse_refused > 0 {
@@ -328,6 +600,19 @@ async fn proxy_openai_path(
             "identity guard refused unsafe cross-identity reuse"
         );
     }
+
+    let planned_delivery = dispatch_action_sink_event(
+        &state,
+        ActionSinkEvent::new(
+            ActionSinkPhase::Planned,
+            path,
+            &request_shape,
+            &trace,
+            action_plan.clone(),
+            Vec::new(),
+        ),
+    )
+    .await?;
 
     let target_url = format!("{}{}", engine.base_url.trim_end_matches('/'), path);
     tracing::info!(
@@ -346,6 +631,14 @@ async fn proxy_openai_path(
     }
     request = request.header("x-quillcache-engine-id", trace.engine_id.as_str());
     request = request.header("x-quillcache-request-id", trace.request_id.as_str());
+    request = request.header("x-quillcache-mode", serving_mode_header(trace.mode));
+    request = request.header(
+        "x-quillcache-decode-engine-id",
+        trace.decode_engine_id.as_str(),
+    );
+    if let Some(prefill_engine_id) = trace.prefill_engine_id.as_deref() {
+        request = request.header("x-quillcache-prefill-engine-id", prefill_engine_id);
+    }
     request = request.header(
         "x-quillcache-reusable-blocks",
         trace.reusable_blocks.to_string(),
@@ -359,10 +652,29 @@ async fn proxy_openai_path(
     // blocks, so the next request for the same prefix sees them resident on this
     // engine — cache-aware routing now works end-to-end without a KV-events
     // bridge. (Tier 2 events later correct this inference on eviction.)
+    let mut cache_action_list = Vec::new();
     if status.is_success() {
         let mut control = state.control.write().await;
-        control.observe_placement(&trace.engine_id, &request_shape, DEFAULT_BLOCK_BYTES);
+        cache_action_list =
+            control.observe_placement(&trace.engine_id, &request_shape, DEFAULT_BLOCK_BYTES);
     }
+    let committed_delivery = if status.is_success() {
+        dispatch_action_sink_event(
+            &state,
+            ActionSinkEvent::new(
+                ActionSinkPhase::Committed,
+                path,
+                &request_shape,
+                &trace,
+                action_plan,
+                cache_action_list.clone(),
+            ),
+        )
+        .await?
+    } else {
+        ActionSinkDelivery::Disabled
+    };
+    let action_sink_delivery = planned_delivery.merge(committed_delivery);
 
     let mut response = Response::builder().status(status);
     for (name, value) in upstream.headers() {
@@ -372,6 +684,21 @@ async fn proxy_openai_path(
     }
     response = response
         .header("x-quillcache-engine-id", trace.engine_id)
+        .header("x-quillcache-mode", serving_mode_header(trace.mode))
+        .header("x-quillcache-decode-engine-id", trace.decode_engine_id)
+        .header(
+            "x-quillcache-prefill-engine-id",
+            trace.prefill_engine_id.unwrap_or_default(),
+        )
+        .header(
+            "x-quillcache-planner-actions",
+            trace.planner_actions.to_string(),
+        )
+        .header(
+            "x-quillcache-cache-actions",
+            cache_action_list.len().to_string(),
+        )
+        .header("x-quillcache-action-sink", action_sink_delivery.as_header())
         .header("x-quillcache-request-id", trace.request_id)
         .header("x-quillcache-local-hits", trace.local_hits.to_string())
         .header(
@@ -397,6 +724,35 @@ async fn proxy_openai_path(
     response
         .body(axum::body::Body::from_stream(upstream.bytes_stream()))
         .map_err(GatewayHttpError::BuildResponse)
+}
+
+async fn dispatch_action_sink_event(
+    state: &GatewayState,
+    event: ActionSinkEvent,
+) -> Result<ActionSinkDelivery, GatewayHttpError> {
+    let Some(sink) = state.action_sink.as_ref() else {
+        return Ok(ActionSinkDelivery::Disabled);
+    };
+    match sink.publish(&state.client, &event).await {
+        Ok(()) => Ok(ActionSinkDelivery::Sent),
+        Err(error) if sink.fail_open => {
+            tracing::warn!(
+                ?error,
+                phase = ?event.phase,
+                request_id = %event.route.request_id,
+                "action sink delivery failed; continuing because fail_open=true"
+            );
+            Ok(ActionSinkDelivery::Failed)
+        }
+        Err(error) => Err(GatewayHttpError::ActionSink(error.to_string())),
+    }
+}
+
+fn serving_mode_header(mode: ServingMode) -> &'static str {
+    match mode {
+        ServingMode::Aggregated => "aggregated",
+        ServingMode::Disaggregated => "disaggregated",
+    }
 }
 
 fn request_shape_from_payload(payload: &mut Value) -> RequestShape {
@@ -582,6 +938,8 @@ enum GatewayHttpError {
     MissingEngine(String),
     #[error("upstream request failed: {0}")]
     Upstream(#[from] reqwest::Error),
+    #[error("action sink delivery failed: {0}")]
+    ActionSink(String),
     #[error("failed to build response: {0}")]
     BuildResponse(axum::http::Error),
 }
@@ -592,7 +950,7 @@ impl IntoResponse for GatewayHttpError {
         let status = match self {
             Self::Json(_) => StatusCode::BAD_REQUEST,
             Self::MissingEngine(_) => StatusCode::BAD_GATEWAY,
-            Self::Control(_) | Self::Upstream(_) | Self::BuildResponse(_) => {
+            Self::Control(_) | Self::Upstream(_) | Self::ActionSink(_) | Self::BuildResponse(_) => {
                 StatusCode::BAD_GATEWAY
             }
         };
@@ -638,6 +996,8 @@ mod tests {
             policy: None,
             index: None,
             index_path: None,
+            data_plane: None,
+            action_sink: None,
         };
         // No backend configured -> in-memory reference.
         assert_eq!(build_index(&base).name(), "memory");
@@ -647,6 +1007,88 @@ mod tests {
             ..base.clone()
         };
         assert_eq!(build_index(&unknown).name(), "memory");
+    }
+
+    #[test]
+    fn build_data_plane_supports_tiered_runtime_backend() {
+        assert_eq!(build_data_plane(None).name(), "none");
+        let config = DataPlaneConfig {
+            kind: "tiered".to_string(),
+            hbm_capacity_bytes: Some(1024),
+            cpu_dram_capacity_bytes: Some(2048),
+            local_ssd_capacity_bytes: Some(4096),
+        };
+        let data_plane = build_data_plane(Some(&config));
+        assert_eq!(data_plane.name(), "tiered");
+        assert_eq!(data_plane.metrics().resident_blocks, 0);
+    }
+
+    #[test]
+    fn build_action_sink_defaults_to_none_and_supports_http() {
+        assert!(build_action_sink(None).unwrap().is_none());
+        let sink = build_action_sink(Some(&ActionSinkConfig {
+            kind: "http".to_string(),
+            url: Some("http://127.0.0.1:9090/v1/quillcache/actions".to_string()),
+            fail_open: false,
+            timeout_ms: 500,
+        }))
+        .unwrap()
+        .unwrap();
+
+        let snapshot = sink.snapshot();
+        assert_eq!(snapshot.kind, "http");
+        assert!(!snapshot.fail_open);
+        assert_eq!(snapshot.timeout_ms, 500);
+    }
+
+    #[test]
+    fn action_sink_event_carries_request_plan_and_cache_actions() {
+        let request = RequestShape {
+            id: "req-a".to_string(),
+            model_id: "model".to_string(),
+            tokenizer_id: "tok".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant".to_string(),
+            session_id: None,
+            blocks: vec![],
+            estimated_decode_tokens: 1,
+            slo: SloTarget::default(),
+        };
+        let route = GatewayRouteTrace {
+            request_id: "req-a".to_string(),
+            mode: ServingMode::Aggregated,
+            engine_id: "vllm-a".to_string(),
+            prefill_engine_id: None,
+            decode_engine_id: "vllm-a".to_string(),
+            planner_actions: 1,
+            reusable_blocks: 0,
+            local_hits: 0,
+            transfer_blocks: 0,
+            recompute_blocks: 0,
+            reuse_refused: 0,
+            estimated_ttft_us: 10,
+            estimated_tpot_us: 20,
+        };
+        let plan = ActionSinkPlan {
+            mode: ServingMode::Aggregated,
+            execution_worker_id: "vllm-a".to_string(),
+            prefill_worker_id: None,
+            decode_worker_id: "vllm-a".to_string(),
+            actions: vec![],
+        };
+        let event = ActionSinkEvent::new(
+            ActionSinkPhase::Planned,
+            "/v1/chat/completions",
+            &request,
+            &route,
+            plan,
+            vec![],
+        );
+
+        assert_eq!(event.schema_version, 1);
+        assert_eq!(event.phase, ActionSinkPhase::Planned);
+        assert_eq!(event.request.id, "req-a");
+        assert_eq!(event.route.engine_id, "vllm-a");
     }
 
     #[test]

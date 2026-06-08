@@ -72,7 +72,8 @@ swapping in the real vLLM URL is then a one-line change.
 ## What to capture
 
 - TTFT p50/p99 (from `run_trace.py`), `GreedyStatePlaneRouter` vs `LeastLoadedRouter`.
-- `x-quillcache-*` headers: selected engine, local hits, transfer/recompute blocks.
+- `x-quillcache-*` headers: selected engine, mode, prefill/decode engine ids,
+  local hits, transfer/recompute blocks, planner actions, cache actions.
 - `/v1/state`: resident KV blocks per engine (with the bridge running).
 
 ## Troubleshooting
@@ -85,8 +86,9 @@ swapping in the real vLLM URL is then a one-line change.
 - **First request is slow / returns a 303 redirect with `__modal_function_call_id`:**
   the container is cold-starting (GPU boot + model load, ~1–2 min). Warm it with
   `curl -L <url>/v1/models` and retry.
-- **TTFT through the gateway ≈ total latency:** the v0.1 gateway buffers the
-  upstream response before returning. Measure true first-token TTFT by pointing
-  `run_trace.py` directly at vLLM, or stream-proxy the gateway (planned).
+- **TTFT through the gateway looks wrong:** the gateway now streams the upstream
+  body instead of buffering it, so TTFT should reflect the real engine response.
+  Check that the upstream vLLM endpoint itself is streaming and that your client
+  measures first byte / first SSE chunk instead of full response latency.
 - **Cost:** the Modal app scales to zero on idle; `modal app stop quillcache-vllm`
   forces it down.

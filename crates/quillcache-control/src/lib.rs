@@ -1,7 +1,8 @@
 use quillcache_core::{
-    BlockRemovedEvent, BlockStoredEvent, CacheResidency, CacheTier, DataPlane, EngineEndpoint,
-    ExternalKvBlockKey, IdentityScope, IndexBackend, KvBlockKey, KvEvent, KvEventBatch,
-    MemoryIndex, NoDataPlane, RequestShape, ReuseViolation, WorkerState,
+    BlockRemovedEvent, BlockStoredEvent, CacheResidency, CacheTier, DataPlane, DataPlaneAction,
+    DataPlaneUpdate, EngineEndpoint, EngineRole, ExternalKvBlockKey, IdentityScope, IndexBackend,
+    KvBlockKey, KvEvent, KvEventBatch, MemoryIndex, NoDataPlane, RequestShape, ReuseViolation,
+    WorkerState,
 };
 use quillcache_router::{GreedyStatePlaneRouter, RouteDecision, RouterError, RoutingPolicy};
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,41 @@ pub struct ReuseAudit {
     pub refused_cross_adapter: usize,
     pub refused_cross_model: usize,
     pub refused_cross_tokenizer: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServingMode {
+    Aggregated,
+    Disaggregated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanActionKind {
+    UseLocal,
+    Fetch,
+    Recompute,
+    RunPrefill,
+    Decode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanAction {
+    pub kind: PlanActionKind,
+    pub worker_id: String,
+    pub source_worker_id: Option<String>,
+    pub key: Option<KvBlockKey>,
+    pub tier: Option<CacheTier>,
+    pub estimated_us: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestPlan {
+    pub mode: ServingMode,
+    pub execution_worker_id: String,
+    pub prefill_worker_id: Option<String>,
+    pub decode_worker_id: String,
+    pub route: RouteDecision,
+    pub actions: Vec<PlanAction>,
 }
 
 /// Translate a batch of engine KV events into residency updates against any
@@ -237,6 +273,107 @@ impl ControlPlane {
             .map_err(ControlError::from)
     }
 
+    pub fn plan(&self, request: &RequestShape) -> Result<RequestPlan, ControlError> {
+        let residency = self.residency.snapshot();
+        let decode_workers = self
+            .workers
+            .iter()
+            .filter(|worker| worker.role.can_decode())
+            .cloned()
+            .collect::<Vec<_>>();
+        let route_workers = if decode_workers.is_empty() {
+            self.workers.clone()
+        } else {
+            decode_workers
+        };
+        let route = self
+            .router
+            .route(request, &route_workers, &residency)
+            .map_err(ControlError::from)?;
+        let decode_worker_id = route.worker_id.clone();
+        let decode_role = self
+            .workers
+            .iter()
+            .find(|worker| worker.id == decode_worker_id)
+            .map(|worker| worker.role)
+            .unwrap_or(EngineRole::Aggregated);
+
+        let prefill_worker_id = if decode_role == EngineRole::Decode && !route.recomputes.is_empty()
+        {
+            self.workers
+                .iter()
+                .filter(|worker| worker.role.can_prefill())
+                .min_by_key(|worker| {
+                    u64::from(worker.queued_prefill_tokens)
+                        + u64::from(worker.running_decodes) * 1_000
+                })
+                .map(|worker| worker.id.clone())
+        } else {
+            None
+        };
+        let mode = if prefill_worker_id.is_some() {
+            ServingMode::Disaggregated
+        } else {
+            ServingMode::Aggregated
+        };
+        let execution_worker_id = decode_worker_id.clone();
+        let mut actions = Vec::new();
+
+        for key in &route.local_hits {
+            actions.push(PlanAction {
+                kind: PlanActionKind::UseLocal,
+                worker_id: decode_worker_id.clone(),
+                source_worker_id: None,
+                key: Some(key.clone()),
+                tier: Some(CacheTier::Hbm),
+                estimated_us: 0,
+            });
+        }
+        for transfer in &route.transfers {
+            actions.push(PlanAction {
+                kind: PlanActionKind::Fetch,
+                worker_id: decode_worker_id.clone(),
+                source_worker_id: Some(transfer.from_worker_id.clone()),
+                key: Some(transfer.key.clone()),
+                tier: Some(transfer.tier),
+                estimated_us: transfer.estimated_us,
+            });
+        }
+        for recompute in &route.recomputes {
+            actions.push(PlanAction {
+                kind: if prefill_worker_id.is_some() {
+                    PlanActionKind::RunPrefill
+                } else {
+                    PlanActionKind::Recompute
+                },
+                worker_id: prefill_worker_id
+                    .clone()
+                    .unwrap_or_else(|| execution_worker_id.clone()),
+                source_worker_id: None,
+                key: Some(recompute.key.clone()),
+                tier: None,
+                estimated_us: recompute.estimated_us,
+            });
+        }
+        actions.push(PlanAction {
+            kind: PlanActionKind::Decode,
+            worker_id: decode_worker_id.clone(),
+            source_worker_id: prefill_worker_id.clone(),
+            key: None,
+            tier: None,
+            estimated_us: route.estimated_tpot_us,
+        });
+
+        Ok(RequestPlan {
+            mode,
+            execution_worker_id,
+            prefill_worker_id,
+            decode_worker_id,
+            route,
+            actions,
+        })
+    }
+
     /// Record that a request's blocks were placed on `engine_id` — *inferred*
     /// residency from the control plane's own routing decision. This closes the
     /// online loop: the engine runs with prefix caching, so after it serves a
@@ -245,18 +382,33 @@ impl ControlPlane {
     /// from `/v1/kv-events`, so cache-aware routing is blind until a bridge is
     /// wired. KV events (Tier 2) later *correct* this inference (e.g. on
     /// eviction); inferred residency is the floor, ground truth the upgrade.
-    pub fn observe_placement(&mut self, engine_id: &str, request: &RequestShape, block_bytes: u64) {
+    pub fn observe_placement(
+        &mut self,
+        engine_id: &str,
+        request: &RequestShape,
+        block_bytes: u64,
+    ) -> Vec<DataPlaneAction> {
+        let mut actions = Vec::new();
         for block in &request.blocks {
-            self.residency.put(CacheResidency::hbm(
-                engine_id.to_string(),
-                block.clone(),
-                block_bytes,
-            ));
+            let residency = CacheResidency::hbm(engine_id.to_string(), block.clone(), block_bytes);
+            if self.data_plane.name() == "none" {
+                self.residency.put(residency);
+            } else {
+                let update = self.data_plane.place(residency);
+                actions.extend(self.mirror_data_plane_update(update));
+            }
         }
+        actions
     }
 
     pub fn ingest(&mut self, batch: KvEventBatch) -> Result<IngestSummary, ControlError> {
-        ingest_batch(self.residency.as_mut(), batch, &self.engines)
+        let mut summary = ingest_batch(self.residency.as_mut(), batch.clone(), &self.engines)?;
+        if self.data_plane.name() != "none" {
+            let update = self.apply_batch_to_data_plane(&batch)?;
+            self.mirror_data_plane_update(update);
+            summary.total_resident_blocks = self.residency.len();
+        }
+        Ok(summary)
     }
 
     /// Audit identity-governed safe reuse for a request against current
@@ -325,6 +477,127 @@ impl ControlPlane {
     pub fn flush(&self) {
         self.residency.flush();
     }
+
+    fn mirror_data_plane_update(&mut self, update: DataPlaneUpdate) -> Vec<DataPlaneAction> {
+        for removed in &update.removed {
+            let scope = IdentityScope::from_key(&removed.key);
+            self.residency
+                .remove_block(&scope, &removed.worker_id, &removed.key.block_hash);
+        }
+        for resident in &update.resident {
+            let scope = IdentityScope::from_key(&resident.key);
+            self.residency
+                .remove_block(&scope, &resident.worker_id, &resident.key.block_hash);
+            self.residency.put(resident.clone());
+        }
+        update.actions
+    }
+
+    fn apply_batch_to_data_plane(
+        &mut self,
+        batch: &KvEventBatch,
+    ) -> Result<DataPlaneUpdate, ControlError> {
+        let engine = self
+            .engines
+            .iter()
+            .find(|engine| engine.id == batch.engine_id)
+            .ok_or_else(|| ControlError::UnknownEngine(batch.engine_id.clone()))?
+            .clone();
+        let mut out = DataPlaneUpdate::default();
+        for event in batch.events.clone() {
+            match event {
+                KvEvent::BlockStored(event) => {
+                    let update = self.apply_stored_to_data_plane(&engine, batch, event);
+                    out.actions.extend(update.actions);
+                    out.resident.extend(update.resident);
+                    out.removed.extend(update.removed);
+                }
+                KvEvent::BlockRemoved(event) => {
+                    let scope = IdentityScope {
+                        model_id: batch
+                            .model_id
+                            .clone()
+                            .unwrap_or_else(|| engine.model_id.clone()),
+                        tokenizer_id: batch
+                            .tokenizer_id
+                            .clone()
+                            .unwrap_or_else(|| engine.tokenizer_id.clone()),
+                        adapter_id: batch.adapter_id.clone(),
+                        tenant_id: batch
+                            .tenant_id
+                            .clone()
+                            .unwrap_or_else(|| engine.tenant_id.clone()),
+                    };
+                    for block_hash in event.block_hashes {
+                        let update =
+                            self.data_plane
+                                .remove_block(&scope, &engine.id, block_hash.as_str());
+                        out.actions.extend(update.actions);
+                        out.resident.extend(update.resident);
+                        out.removed.extend(update.removed);
+                    }
+                }
+                KvEvent::AllBlocksCleared => {
+                    let update = self.data_plane.clear_worker(&engine.id);
+                    out.actions.extend(update.actions);
+                    out.resident.extend(update.resident);
+                    out.removed.extend(update.removed);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn apply_stored_to_data_plane(
+        &mut self,
+        engine: &EngineEndpoint,
+        batch: &KvEventBatch,
+        event: BlockStoredEvent,
+    ) -> DataPlaneUpdate {
+        let tier = event
+            .medium
+            .as_deref()
+            .and_then(|medium| CacheTier::from_str(medium).ok())
+            .unwrap_or(CacheTier::Hbm);
+        let block_bytes = event
+            .bytes_per_block
+            .or(batch.bytes_per_block)
+            .unwrap_or(4 * 1024 * 1024);
+        let model_id = batch.model_id.as_deref().unwrap_or(&engine.model_id);
+        let tokenizer_id = batch
+            .tokenizer_id
+            .as_deref()
+            .unwrap_or(&engine.tokenizer_id);
+        let tenant_id = batch.tenant_id.as_deref().unwrap_or(&engine.tenant_id);
+        let adapter_id = batch.adapter_id.clone().or(event.lora_name.clone());
+        let mut parent = event
+            .parent_block_hash
+            .clone()
+            .unwrap_or_else(|| "root".to_string());
+        let mut out = DataPlaneUpdate::default();
+
+        for (idx, block_hash) in event.block_hashes.into_iter().enumerate() {
+            let key = KvBlockKey::external_hash(ExternalKvBlockKey {
+                model_id: model_id.to_string(),
+                tokenizer_id: tokenizer_id.to_string(),
+                adapter_id: adapter_id.clone(),
+                tenant_id: tenant_id.to_string(),
+                prefix_hash: parent.clone(),
+                block_hash: block_hash.clone(),
+                block_index: idx as u32,
+                token_count: event.block_size,
+            });
+            parent = block_hash;
+            let mut residency = CacheResidency::hbm(engine.id.clone(), key, block_bytes);
+            residency.tier = tier;
+            residency.last_access_ms = batch.ts_ms.unwrap_or(0);
+            let update = self.data_plane.place(residency);
+            out.actions.extend(update.actions);
+            out.resident.extend(update.resident);
+            out.removed.extend(update.removed);
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -336,6 +609,7 @@ mod tests {
         EngineEndpoint {
             id: "vllm-a".to_string(),
             kind: EngineKind::Vllm,
+            role: EngineRole::Aggregated,
             base_url: "http://127.0.0.1:8001".to_string(),
             model_id: "Qwen/Qwen3-0.6B".to_string(),
             tokenizer_id: "Qwen/Qwen3-0.6B".to_string(),
@@ -616,5 +890,106 @@ mod tests {
         // A data plane (LMCache/KVBM/FlexKV adapter) plugs in at this seam.
         let control = control.with_data_plane(Box::new(MockDataPlane::new()));
         assert_eq!(control.data_plane().name(), "mock");
+    }
+
+    #[test]
+    fn planner_emits_disaggregated_prefill_decode_plan() {
+        let prefill = EngineEndpoint {
+            id: "prefill-a".to_string(),
+            role: EngineRole::Prefill,
+            ..engine()
+        };
+        let decode = EngineEndpoint {
+            id: "decode-a".to_string(),
+            role: EngineRole::Decode,
+            ..engine()
+        };
+        let control = ControlPlane::new(vec![prefill, decode]);
+        let request = RequestShape {
+            id: "req-pd".to_string(),
+            model_id: "Qwen/Qwen3-0.6B".to_string(),
+            tokenizer_id: "Qwen/Qwen3-0.6B".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant-a".to_string(),
+            session_id: None,
+            blocks: vec![KvBlockKey::new(
+                "Qwen/Qwen3-0.6B",
+                "Qwen/Qwen3-0.6B",
+                "tenant-a",
+                "root",
+                "cold",
+                0,
+                64,
+            )],
+            estimated_decode_tokens: 16,
+            slo: SloTarget::default(),
+        };
+
+        let plan = control.plan(&request).unwrap();
+        assert_eq!(plan.mode, ServingMode::Disaggregated);
+        assert_eq!(plan.prefill_worker_id.as_deref(), Some("prefill-a"));
+        assert_eq!(plan.decode_worker_id, "decode-a");
+        assert!(plan
+            .actions
+            .iter()
+            .any(|action| action.kind == PlanActionKind::RunPrefill));
+        assert!(plan
+            .actions
+            .iter()
+            .any(|action| action.kind == PlanActionKind::Decode));
+    }
+
+    #[test]
+    fn tiered_data_plane_updates_runtime_residency() {
+        use quillcache_core::{TieredDataPlane, TieredDataPlaneConfig};
+        let mut control = ControlPlane::new(vec![engine()]).with_data_plane(Box::new(
+            TieredDataPlane::new(TieredDataPlaneConfig {
+                hbm_capacity_bytes: 100,
+                cpu_dram_capacity_bytes: 100,
+                local_ssd_capacity_bytes: 100,
+            }),
+        ));
+        let blocks = ["a", "b", "c", "d"]
+            .iter()
+            .enumerate()
+            .map(|(idx, hash)| {
+                KvBlockKey::new(
+                    "Qwen/Qwen3-0.6B",
+                    "Qwen/Qwen3-0.6B",
+                    "tenant-a",
+                    "root",
+                    *hash,
+                    idx as u32,
+                    64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let request = RequestShape {
+            id: "tiered".to_string(),
+            model_id: "Qwen/Qwen3-0.6B".to_string(),
+            tokenizer_id: "Qwen/Qwen3-0.6B".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant-a".to_string(),
+            session_id: None,
+            blocks,
+            estimated_decode_tokens: 16,
+            slo: SloTarget::default(),
+        };
+
+        let actions = control.observe_placement("vllm-a", &request, 100);
+        assert!(actions
+            .iter()
+            .any(|action| action.kind == quillcache_core::DataPlaneActionKind::Evict));
+        let tiers = control
+            .residency()
+            .snapshot()
+            .into_iter()
+            .map(|entry| (entry.key.block_hash, entry.tier))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(tiers.len(), 3);
+        assert_eq!(tiers.get("d"), Some(&CacheTier::Hbm));
+        assert_eq!(tiers.get("c"), Some(&CacheTier::CpuDram));
+        assert_eq!(tiers.get("b"), Some(&CacheTier::LocalSsd));
+        assert!(!tiers.contains_key("a"));
     }
 }

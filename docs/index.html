@@ -101,8 +101,11 @@
     <span class="pill">cache-aware routing</span>
     <span class="pill">identity-safe reuse</span>
     <span class="pill">persistent ART index</span>
+    <span class="pill">runtime planner</span>
+    <span class="pill">HTTP action sink</span>
+    <span class="pill">tiered HBM/DRAM/SSD</span>
     <span class="pill">ART vs LSM study</span>
-    <span class="pill">6 crates · MIT</span>
+    <span class="pill">8 crates · MIT</span>
   </div>
 </header>
 
@@ -161,17 +164,21 @@ flowchart TB
   end
   E["<b>vLLM / SGLang</b><br/>run model · own live KV tensors"]
   D["<b>LMCache · Dynamo KVBM · FlexKV</b><br/>KV tensor data plane / tiers"]
+  A["<b>action sink adapter</b><br/>planned + committed actions"]
   C --> G --> P --> R --> I
   P -. KV events .-> E
   G --> E
+  G --> A
+  A --> E
+  A --> D
   I -. residency metadata .- D
   classDef qc fill:#11151f,stroke:#2c3a55,color:#e6edf3;
   classDef ext fill:#0b0e14,stroke:#222a39,color:#9aa7b8;
-  class G,P,R,I qc; class C,E,D ext;
+  class G,P,R,I qc; class C,E,D,A ext;
     </pre>
   </div>
-  <p class="note">Three pluggable axes — <b>engines</b> × <b>routing policy</b> × <b>index backend</b> —
-  so Experiment mode replays the same trace across the product and Online mode runs one chosen combination.</p>
+  <p class="note">Four pluggable axes — <b>engines</b> × <b>routing policy</b> × <b>index backend</b> ×
+  <b>execution adapter</b> — so Experiment mode replays the same trace across the product and Online mode runs one chosen combination.</p>
 </section>
 
 <section id="dynamo">
@@ -197,11 +204,15 @@ flowchart TB
 
     <div class="c">Disaggregated serving / Planner</div>
     <div class="arrow">~</div>
-    <div class="c">cost model + <code>RouteDecision</code> (reuse / transfer / recompute / SLO) — single-node prototype</div>
+    <div class="c">runtime <code>RequestPlan</code>: aggregated / prefill / decode roles, per-block actions, SLO routing</div>
+
+    <div class="c">Execution hooks / transfer orchestration</div>
+    <div class="arrow">~</div>
+    <div class="c">HTTP <code>action_sink</code>: synchronous <code>planned</code> and <code>committed</code> events for engine/data-plane adapters</div>
 
     <div class="c">Data plane (NIXL transfer, offload)</div>
     <div class="arrow">↔</div>
-    <div class="c">out of scope by design — QuillCache holds metadata, not tensors</div>
+    <div class="c"><code>DataPlane</code> seam + in-process tiered HBM/DRAM/SSD adapter; external tensor movers plug in through the action sink</div>
   </div>
   <p class="disc">Honest scope: QuillCache is a research/portfolio prototype, not a drop-in for Dynamo.
   It re-implements the control-plane ideas (and adds an identity-safe-reuse primitive and a persistent
@@ -253,9 +264,10 @@ $ cargo run --features holt -- bench-index --backend holt --churn-ops 500
 $ cargo run -- safe-reuse            <span class="c1"># naive content reuse vs the identity guard</span>
 
 <span class="c1"># Online mode — OpenAI-compatible gateway, persistent ART residency index</span>
+$ python3 tools/action_sink_mock.py --port 9090
 $ cargo run --features holt -- gateway --config gateway.yaml   <span class="c1"># index: holt</span>
 $ curl localhost:8080/v1/chat/completions -d '{...}'  <span class="c1"># x-quillcache-* decision headers</span></pre>
-  <p class="note">Published on crates.io as six crates (<code>quillcache</code>,
+  <p class="note">Published on crates.io as Rust crates (<code>quillcache</code>,
   <code>-core</code>, <code>-router</code>, <code>-control</code>, <code>-gateway</code>,
   <code>-sim</code>, + the <code>-index-holt</code> / <code>-index-rocksdb</code> backends).</p>
 </section>

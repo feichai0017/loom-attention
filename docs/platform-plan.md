@@ -23,12 +23,16 @@ Mooncake-style transfer paths.
    estimates.
 7. Compare persistent residency-index backends, starting with Holt ART versus a
    RocksDB/LSM baseline.
+8. Execute runtime planner and tiered-cache state transitions in the gateway,
+   not only in the simulator.
+9. Emit planner and data-plane actions to real engine/data-plane adapters.
 
 ## Non-Goals
 
 - no custom attention kernels
 - no replacement for vLLM or SGLang
-- no tensor transfer implementation in the first MVP
+- no in-process transformer tensor transfer; the runtime control plane exposes
+  planner/data-plane actions for external adapters
 - no production-grade multi-tenant isolation guarantee yet
 - no Kubernetes operator in the first MVP
 
@@ -42,6 +46,7 @@ flowchart LR
     I["Residency index\nblock -> worker/tier"]
     E["Event ingest\nHTTP JSON API"]
     B["vLLM event bridge\nZMQ/msgpack -> JSON"]
+    A["action sink adapter\nvLLM kv_transfer / LMCache / KVBM"]
     V["vLLM workers"]
     S["SGLang workers"]
     L["LMCache / HiCache"]
@@ -51,6 +56,10 @@ flowchart LR
     P --> I
     G --> V
     G --> S
+    G --> A
+    A --> V
+    A --> S
+    A --> L
     V --> B --> E --> I
     L --> E
 ```
@@ -67,6 +76,9 @@ The first complete MVP is an event-driven gateway:
 - cache-aware route decisions using the existing greedy router
 - request-local `quillcache` hints for exact block-hash experiments
 - pluggable residency-index interface with a memory backend
+- runtime planner with aggregated/prefill/decode engine roles
+- runtime tiered data plane with HBM/DRAM/SSD admission and eviction
+- HTTP action sink for planner/cache actions
 
 The MVP routes real HTTP requests to real vLLM or SGLang servers. It also ingests
 real vLLM KV events through the bridge when vLLM is started with KV event
@@ -84,6 +96,10 @@ publishing enabled.
 6. Query `/v1/state` and see resident KV blocks indexed by engine.
 7. Confirm `/v1/state.index` reports the active index backend and resident block
    count.
+8. Enable `data_plane: tiered` and confirm `/v1/state.data_plane_metrics`
+   changes after successful requests.
+9. Enable `action_sink.kind: http` and confirm a sidecar receives `planned` and
+   `committed` events.
 
 ## Build Order
 
@@ -96,7 +112,7 @@ publishing enabled.
 7. SGLang/HiCache event adapter.
 8. Policy plugin interface and baseline suite.
 9. Kubernetes deployment path with Gateway API or Envoy.
-10. Real transfer integration through LMCache, vLLM `kv_transfer`, or NIXL.
+10. Real transfer integration through LMCache, vLLM `kv_transfer`, KVBM, or NIXL.
 
 ## Research Claims
 

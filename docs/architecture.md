@@ -14,6 +14,7 @@ flowchart LR
     Router["quillcache-router\nroute scoring"]
     Core["quillcache-core\nstate objects + cost model"]
     Bridge["vLLM event bridge\nZMQ/msgpack -> HTTP JSON"]
+    Sink["action sink adapter\nplanner/cache actions"]
     Engine["vLLM / SGLang workers"]
 
     Client --> Gateway
@@ -21,6 +22,8 @@ flowchart LR
     Control --> Router
     Control --> Core
     Gateway --> Engine
+    Gateway --> Sink
+    Sink --> Engine
     Engine --> Bridge --> Gateway
 ```
 
@@ -43,8 +46,11 @@ only valid when the model, tokenizer, adapter, and tenant policy agree.
 ## Routing Loop
 
 For each request, the gateway builds a `RequestShape` from request metadata and
-optional `quillcache` block hints. The router evaluates candidate workers and
-block-level choices:
+optional `quillcache` block hints. The control plane now builds a `RequestPlan`
+around the router decision. The plan records the serving mode, execution worker,
+optional prefill worker, decode worker, and per-block actions.
+
+The router evaluates candidate workers and block-level choices:
 
 1. use a local HBM hit
 2. transfer a block from another worker or tier
@@ -52,6 +58,55 @@ block-level choices:
 
 The first router is greedy and cost-model based. It is not the final research
 claim; it exists to make baselines and traces executable.
+
+## Runtime Planner And PD Roles
+
+`EngineEndpoint.role` is `Aggregated`, `Prefill`, or `Decode`. Existing configs
+default to `Aggregated`. In a PD fleet the planner routes decode work only to
+decode-capable workers. If a decode worker needs recompute work and a
+prefill-capable worker exists, the `RequestPlan` becomes `Disaggregated` and
+emits `RunPrefill` actions.
+
+The gateway proxies the OpenAI request to `execution_worker_id` and exposes the
+plan through headers:
+
+- `x-quillcache-mode`
+- `x-quillcache-prefill-engine-id`
+- `x-quillcache-decode-engine-id`
+- `x-quillcache-planner-actions`
+- `x-quillcache-cache-actions`
+- `x-quillcache-action-sink`
+
+This is a real runtime control-plane plan. With `action_sink.kind: http`, the
+gateway also POSTs the plan to an external adapter before forwarding the OpenAI
+request. The internal vLLM/SGLang prefill handoff and tensor transfer still
+belong to the adapter, not to the Rust gateway.
+
+## Runtime Tiered Data Plane
+
+`DataPlane` is now a runtime trait, not only a simulator concept. The default
+`NoDataPlane` keeps inferred placement behavior. `TieredDataPlane` manages
+in-process HBM/DRAM/SSD tiers and returns admission, hit, promotion, demotion,
+eviction, and remove actions.
+
+When placement or KV events change tier state, `ControlPlane` mirrors the final
+data-plane state into the `IndexBackend`, so `/v1/state` shows both index
+residency and data-plane residency.
+
+## Runtime Action Sink
+
+The action sink is the execution seam between QuillCache policy and engine/data
+plane mechanics. It receives:
+
+- `planned` events before the request reaches the engine, including full
+  `RequestShape` and `PlanAction` records (`UseLocal`, `Fetch`, `RunPrefill`,
+  `Recompute`, `Decode`).
+- `committed` events after successful upstream execution, including
+  `DataPlaneAction` records (`Admit`, `Promote`, `Demote`, `Evict`, `Remove`).
+
+`fail_open: true` keeps the gateway available when a research adapter is down.
+`fail_open: false` is for adapters that must complete transfer/prefill before
+decode can proceed.
 
 ## Residency Index Boundary
 
@@ -77,10 +132,10 @@ KvBlockKey -> Vec<CacheResidency>
 (including `bytes_written` for write-amplification studies and a `persistent()`
 flag for recovery studies).
 
-The planned persistent backend is Holt. Holt should store prefix/residency
-metadata and recovery state. It should not become the component that moves KV
-tensors between GPU, DRAM, SSD, or remote memory. That responsibility belongs to
-the inference engine and data-plane connectors.
+The persistent ART backend is Holt. Holt stores prefix/residency metadata and
+recovery state. It is not the component that moves KV tensors between GPU, DRAM,
+SSD, or remote memory. That responsibility belongs to the inference engine and
+data-plane connectors.
 
 This split leaves room for ART-vs-LSM research: Holt and a RocksDB baseline
 implement the same `IndexBackend` trait while the gateway, event ingest, and
@@ -101,9 +156,10 @@ engine. The gateway strips the optional `quillcache` request object before
 forwarding. This lets benchmarks provide exact block hashes while keeping the
 upstream vLLM/SGLang request clean.
 
-`GET /v1/state` returns configured engines, worker state, index stats, and the
-current residency snapshot. This endpoint is intentionally simple because v0.1
-is a research prototype, not an operator UI.
+`GET /v1/state` returns configured engines, worker state, index stats,
+data-plane stats, action-sink config, data-plane residency, and the current
+index residency snapshot. This endpoint is intentionally simple because v0.1 is
+a research prototype, not an operator UI.
 
 The event ingest endpoint accepts a vendor-neutral JSON shape compatible with
 vLLM's KV event concepts: block stored, block removed, and all blocks cleared.
@@ -117,6 +173,8 @@ The connector layer should be thin:
 - observe KV block creation and eviction events from an engine
 - inject reusable blocks back into the engine KV manager
 - expose transfer metadata for disaggregated prefill/decode
+- consume gateway action-sink events and return 2xx only after required
+  prefill/fetch work is ready
 - keep engine-specific layout details outside the router
 
 Initial integration targets should be vLLM or SGLang via existing connector

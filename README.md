@@ -23,6 +23,10 @@ It is built as a **research instrument**: engines, routing policies, and index
 backends are all pluggable, so you can replay one workload across many
 combinations and measure them apples-to-apples.
 
+Runtime PD roles, planner actions, tiered HBM/DRAM/SSD cache state, and an HTTP
+action sink now run in the gateway path; see
+[`docs/runtime-control-plane.md`](docs/runtime-control-plane.md).
+
 ## What it is / is not
 
 | It IS | It is NOT |
@@ -79,6 +83,8 @@ mode runs one chosen combination in front of real engines.
 | Inference engine / connector | `EngineEndpoint` + KV events | vLLM (OpenAI-compatible + KV events) | SGLang, LMCache events |
 | Routing policy | `quillcache_core` → `quillcache_router::RoutingPolicy` | `LeastLoadedRouter` (baseline), `GreedyStatePlaneRouter` (cache-aware), `PrefixAffinityRouter`, `RoundRobinRouter`, **`SloAwareRouter`** (SLO as a near-hard constraint), **`SessionAffinityRouter`** (pin a session/DAG to its engine) | network-aware |
 | Index backend | `quillcache_core::IndexBackend` | `MemoryIndex` (reference), **Holt** (ART), **RocksDB** (LSM) | filesystem |
+| Runtime data plane | `quillcache_core::DataPlane` | `NoDataPlane`, **`TieredDataPlane`** (HBM/DRAM/SSD admission, promotion, demotion, eviction) | LMCache/KVBM/FlexKV adapters |
+| Execution adapter | gateway `action_sink` | HTTP action events + local mock sink | vLLM `kv_transfer`, SGLang/LMCache, Dynamo KVBM bridge |
 
 ## Two "KV"s, two "backends" (read this first)
 
@@ -252,6 +258,10 @@ cargo run -- plan
 cargo run -- gateway --config examples/quillcache-gateway.yaml
 # ...backed by a persistent ART (Holt) residency index that survives restarts:
 cargo run --features holt -- gateway --config examples/quillcache-gateway.yaml  # set index: holt
+# ...with a local action-sink receiver for planner/cache actions:
+python3 tools/action_sink_mock.py --port 9090
+# ...then, in another terminal, runtime PD roles + tiered HBM/DRAM/SSD:
+cargo run --features holt -- gateway --config examples/quillcache-pd-tiered.yaml
 
 # Tests
 cargo test --workspace
@@ -260,8 +270,9 @@ cargo test --workspace
 Online-mode endpoints: `POST /v1/chat/completions`, `POST /v1/completions`,
 `POST /v1/kv-events`, `GET /v1/state`, `GET /healthz`. The gateway strips the
 optional `quillcache` request object before forwarding, so benchmarks can supply
-exact block hashes while keeping the upstream request clean. See
-[`docs/mvp-runbook.md`](docs/mvp-runbook.md) for the vLLM KV-events bridge.
+exact block hashes while keeping the upstream request clean. `action_sink` can
+POST runtime plan/cache events to an adapter before and after the engine call.
+See [`docs/mvp-runbook.md`](docs/mvp-runbook.md) for the vLLM KV-events bridge.
 
 ## Documentation
 
@@ -269,6 +280,7 @@ exact block hashes while keeping the upstream request clean. See
 - [`docs/architecture.md`](docs/architecture.md) — components, boundaries, the index seam.
 - [`docs/index-backends.md`](docs/index-backends.md) — `IndexBackend`, Holt/RocksDB plan, ART-vs-LSM measurement.
 - [`docs/platform-plan.md`](docs/platform-plan.md) — platform goals, MVP scope, build order.
+- [`docs/runtime-control-plane.md`](docs/runtime-control-plane.md) — online PD roles, tiered data plane, and action-sink API.
 - [`docs/research-agenda.md`](docs/research-agenda.md) — claim budget and research bets.
 - [`docs/experiments.md`](docs/experiments.md) — experiment harness and baselines.
 - [`docs/mvp-runbook.md`](docs/mvp-runbook.md) — run the gateway against real vLLM.
@@ -282,6 +294,7 @@ exact block hashes while keeping the upstream request clean. See
 - ✅ Single `IndexBackend` seam with an in-memory reference backend + identity-aware prefix scan.
 - ✅ **Persistent residency index in the online gateway** (`index: holt` / `rocksdb`): the control plane can be backed by Holt (persistent ART), so fleet residency **survives a gateway restart** — verified live (2 blocks placed → SIGTERM flush → reopen → 2 blocks recovered, no replay of events).
 - ✅ Mixed **engine fleet** behind one control plane (vLLM + SGLang, both OpenAI-compatible — see `examples/quillcache-mixed-fleet.yaml`) and a **`DataPlane` seam** where a KV-tensor store (LMCache / Dynamo KVBM / FlexKV) plugs in under the control plane (`NoDataPlane` default, `MockDataPlane` for tests).
+- ✅ **Runtime action sink**: the gateway emits synchronous `planned` and `committed` HTTP events with full `RequestShape`, `PlanAction`, and `DataPlaneAction` payloads. This is the adapter seam for vLLM `kv_transfer`, SGLang/LMCache, or Dynamo KVBM.
 - ✅ **Tiered KV block management** (`quillcache tiered`) — a KVBM-style HBM→DRAM→SSD cache with promotion / demotion / eviction vs an HBM-only baseline. On a skewed trace it turns ~13k recomputes into cheap tier-hits and cuts total prefill cost **~76%** (HBM 59% / DRAM 22% / SSD 10% hits, 9% miss).
 - ✅ **Prefill/decode disaggregation** (`quillcache disagg`) — a discrete-event TTFT sim of the Dynamo/llm-d topology (aggregated prefill+decode per engine vs a prefill pool + decode pool, Poisson arrivals). Disaggregation cuts p99 TTFT **24% @ 75% load, 41% @ 90%** (prefill no longer queues behind long decodes); the gain grows with load.
 - ✅ Pluggable `RoutingPolicy`: load-only baseline, cache-aware greedy, prefix-affinity, round-robin, SLO-aware (SLO as a near-hard constraint), and session-affine (pin a multi-turn/agent session to the engine accumulating its KV).
@@ -297,7 +310,7 @@ exact block hashes while keeping the upstream request clean. See
 1. ✅ Holt (ART) + RocksDB (LSM) `IndexBackend`s + ART-vs-LSM benchmark + eviction churn (O(matches) `remove_block`) — done; next: true write-amplification, Holt compaction/on-disk, larger traces.
 2. ✅ SLO-aware routing (`SloAwareRouter`) and session/DAG-affine routing (`SessionAffinityRouter`: pin a session to the engine accumulating its KV) — done; next: network-aware placement.
 3. ✅ Real vLLM KV-event connector end-to-end (inferred placement + Tier-2 `/v1/kv-events` correction) — done; next: SGLang connector, chat / RAG / agent traces.
-4. ✅ Tiered placement and eviction across HBM / DRAM / SSD (`tiered`, KVBM-style) — done; next: remote tier, tier-aware routing in the online path.
+4. ✅ Tiered placement and eviction across HBM / DRAM / SSD (`tiered`, KVBM-style) + online action-sink events — done; next: remote tier and a real vLLM/SGLang adapter.
 5. ✅ Identity-governed safe reuse: refuse unsafe reuse and quantify its cost (`safe-reuse`) — done; next: enforce it inline in the gateway and add cross-model/tokenizer/quant axes.
 6. Baselines: engine-local prefix caching, LMCache-style cache, Mooncake-style pool.
 

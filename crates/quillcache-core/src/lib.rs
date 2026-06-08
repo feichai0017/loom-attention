@@ -135,6 +135,8 @@ impl CacheResidency {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerState {
     pub id: String,
+    #[serde(default)]
+    pub role: EngineRole,
     pub locality_domain: String,
     pub hbm_capacity_bytes: u64,
     pub hbm_used_bytes: u64,
@@ -148,6 +150,7 @@ impl WorkerState {
     pub fn new(id: impl Into<String>, locality_domain: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            role: EngineRole::Aggregated,
             locality_domain: locality_domain.into(),
             hbm_capacity_bytes: 80 * 1024 * 1024 * 1024,
             hbm_used_bytes: 0,
@@ -163,6 +166,11 @@ impl WorkerState {
         self.running_decodes = running_decodes;
         self
     }
+
+    pub fn with_role(mut self, role: EngineRole) -> Self {
+        self.role = role;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,10 +181,30 @@ pub enum EngineKind {
     Mock,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EngineRole {
+    #[default]
+    Aggregated,
+    Prefill,
+    Decode,
+}
+
+impl EngineRole {
+    pub fn can_prefill(self) -> bool {
+        matches!(self, Self::Aggregated | Self::Prefill)
+    }
+
+    pub fn can_decode(self) -> bool {
+        matches!(self, Self::Aggregated | Self::Decode)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineEndpoint {
     pub id: String,
     pub kind: EngineKind,
+    #[serde(default)]
+    pub role: EngineRole,
     pub base_url: String,
     pub model_id: String,
     pub tokenizer_id: String,
@@ -186,7 +214,7 @@ pub struct EngineEndpoint {
 
 impl EngineEndpoint {
     pub fn worker_state(&self) -> WorkerState {
-        WorkerState::new(self.id.clone(), self.locality_domain.clone())
+        WorkerState::new(self.id.clone(), self.locality_domain.clone()).with_role(self.role)
     }
 }
 
@@ -745,13 +773,58 @@ impl IndexBackend for MemoryIndex {
     }
 }
 
-/// A KV **tensor** data plane (LMCache / NVIDIA Dynamo KVBM / Tencent FlexKV)
-/// that QuillCache's control plane sits *above*. QuillCache owns metadata and
-/// decisions; a data plane actually stores and moves the KV tensor bytes across
-/// tiers (HBM / DRAM / SSD / remote). This trait is the seam where such a system
-/// plugs in: the control plane can ask where a block's bytes live and what
-/// fetching them would cost, without ever owning the tensors. The default
-/// [`NoDataPlane`] means "infer placement from routing + KV events alone".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataPlaneMetrics {
+    pub resident_blocks: u64,
+    pub resident_bytes: u64,
+    pub hbm_bytes: u64,
+    pub cpu_dram_bytes: u64,
+    pub local_ssd_bytes: u64,
+    pub admits: u64,
+    pub hits: u64,
+    pub promotions: u64,
+    pub demotions: u64,
+    pub evictions: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DataPlaneActionKind {
+    Admit,
+    Hit,
+    Promote,
+    Demote,
+    Evict,
+    Remove,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataPlaneAction {
+    pub kind: DataPlaneActionKind,
+    pub worker_id: String,
+    pub key: KvBlockKey,
+    pub from_tier: Option<CacheTier>,
+    pub to_tier: Option<CacheTier>,
+    pub bytes: u64,
+    pub estimated_us: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataPlaneUpdate {
+    pub actions: Vec<DataPlaneAction>,
+    pub resident: Vec<CacheResidency>,
+    pub removed: Vec<CacheResidency>,
+}
+
+impl DataPlaneUpdate {
+    pub fn is_empty(&self) -> bool {
+        self.actions.is_empty() && self.resident.is_empty() && self.removed.is_empty()
+    }
+}
+
+/// A KV tensor data plane (LMCache / NVIDIA Dynamo KVBM / Tencent FlexKV) that
+/// QuillCache's control plane sits above. QuillCache owns metadata and
+/// decisions; a data plane stores and moves KV tensor bytes across tiers (HBM /
+/// DRAM / SSD / remote). This trait is the seam where such a system plugs in.
 pub trait DataPlane: std::fmt::Debug + Send + Sync {
     /// Stable name for reports (for example "none", "mock", "lmcache").
     fn name(&self) -> &str;
@@ -762,6 +835,49 @@ pub trait DataPlane: std::fmt::Debug + Send + Sync {
     /// Estimated microseconds to make the block available on `worker_id` (fetch
     /// / transfer / load from its tier). `None` if the data plane can't say.
     fn fetch_cost_us(&self, worker_id: &str, key: &KvBlockKey) -> Option<u64>;
+
+    /// Observe that a worker has produced or touched a KV block. Implementations
+    /// may admit it, promote it, demote colder blocks, or evict victims. The
+    /// returned update is what the control plane mirrors into the residency
+    /// index.
+    fn place(&mut self, residency: CacheResidency) -> DataPlaneUpdate;
+
+    /// Remove a block from a worker/tier namespace by identity scope and content
+    /// hash. This is used when real KV events correct inferred placement.
+    fn remove_block(
+        &mut self,
+        scope: &IdentityScope,
+        worker_id: &str,
+        block_hash: &str,
+    ) -> DataPlaneUpdate;
+
+    fn clear_worker(&mut self, worker_id: &str) -> DataPlaneUpdate;
+
+    fn snapshot(&self) -> Vec<CacheResidency>;
+
+    fn metrics(&self) -> DataPlaneMetrics {
+        let snapshot = self.snapshot();
+        DataPlaneMetrics {
+            resident_blocks: snapshot.len() as u64,
+            resident_bytes: snapshot.iter().map(|entry| entry.bytes).sum(),
+            hbm_bytes: snapshot
+                .iter()
+                .filter(|entry| entry.tier == CacheTier::Hbm)
+                .map(|entry| entry.bytes)
+                .sum(),
+            cpu_dram_bytes: snapshot
+                .iter()
+                .filter(|entry| entry.tier == CacheTier::CpuDram)
+                .map(|entry| entry.bytes)
+                .sum(),
+            local_ssd_bytes: snapshot
+                .iter()
+                .filter(|entry| entry.tier == CacheTier::LocalSsd)
+                .map(|entry| entry.bytes)
+                .sum(),
+            ..DataPlaneMetrics::default()
+        }
+    }
 }
 
 /// No external data plane: QuillCache infers residency from routing decisions
@@ -773,11 +889,34 @@ impl DataPlane for NoDataPlane {
     fn name(&self) -> &str {
         "none"
     }
+
     fn tier_of(&self, _worker_id: &str, _key: &KvBlockKey) -> Option<CacheTier> {
         None
     }
+
     fn fetch_cost_us(&self, _worker_id: &str, _key: &KvBlockKey) -> Option<u64> {
         None
+    }
+
+    fn place(&mut self, _residency: CacheResidency) -> DataPlaneUpdate {
+        DataPlaneUpdate::default()
+    }
+
+    fn remove_block(
+        &mut self,
+        _scope: &IdentityScope,
+        _worker_id: &str,
+        _block_hash: &str,
+    ) -> DataPlaneUpdate {
+        DataPlaneUpdate::default()
+    }
+
+    fn clear_worker(&mut self, _worker_id: &str) -> DataPlaneUpdate {
+        DataPlaneUpdate::default()
+    }
+
+    fn snapshot(&self) -> Vec<CacheResidency> {
+        Vec::new()
     }
 }
 
@@ -818,6 +957,512 @@ impl DataPlane for MockDataPlane {
         let bytes = u64::from(key.token_count) * 128 * 1024;
         Some(self.cost.transfer_cost_us(tier, bytes, true, true))
     }
+
+    fn place(&mut self, residency: CacheResidency) -> DataPlaneUpdate {
+        self.place(
+            residency.worker_id.clone(),
+            residency.key.clone(),
+            residency.tier,
+        );
+        DataPlaneUpdate {
+            actions: vec![DataPlaneAction {
+                kind: DataPlaneActionKind::Admit,
+                worker_id: residency.worker_id.clone(),
+                key: residency.key.clone(),
+                from_tier: None,
+                to_tier: Some(residency.tier),
+                bytes: residency.bytes,
+                estimated_us: 0,
+            }],
+            resident: vec![residency],
+            removed: Vec::new(),
+        }
+    }
+
+    fn remove_block(
+        &mut self,
+        scope: &IdentityScope,
+        worker_id: &str,
+        block_hash: &str,
+    ) -> DataPlaneUpdate {
+        let mut removed = Vec::new();
+        self.tiers.retain(|(worker, key), tier| {
+            let should_remove =
+                worker == worker_id && key.block_hash == block_hash && scope.matches(key);
+            if should_remove {
+                removed.push(CacheResidency {
+                    key: key.clone(),
+                    worker_id: worker.clone(),
+                    tier: *tier,
+                    bytes: u64::from(key.token_count) * 128 * 1024,
+                    last_access_ms: 0,
+                    ref_count: 0,
+                    pinned: false,
+                });
+            }
+            !should_remove
+        });
+        DataPlaneUpdate {
+            actions: removed
+                .iter()
+                .map(|entry| DataPlaneAction {
+                    kind: DataPlaneActionKind::Remove,
+                    worker_id: entry.worker_id.clone(),
+                    key: entry.key.clone(),
+                    from_tier: Some(entry.tier),
+                    to_tier: None,
+                    bytes: entry.bytes,
+                    estimated_us: 0,
+                })
+                .collect(),
+            resident: Vec::new(),
+            removed,
+        }
+    }
+
+    fn clear_worker(&mut self, worker_id: &str) -> DataPlaneUpdate {
+        let mut removed = Vec::new();
+        self.tiers.retain(|(worker, key), tier| {
+            let should_remove = worker == worker_id;
+            if should_remove {
+                removed.push(CacheResidency {
+                    key: key.clone(),
+                    worker_id: worker.clone(),
+                    tier: *tier,
+                    bytes: u64::from(key.token_count) * 128 * 1024,
+                    last_access_ms: 0,
+                    ref_count: 0,
+                    pinned: false,
+                });
+            }
+            !should_remove
+        });
+        DataPlaneUpdate {
+            actions: removed
+                .iter()
+                .map(|entry| DataPlaneAction {
+                    kind: DataPlaneActionKind::Remove,
+                    worker_id: entry.worker_id.clone(),
+                    key: entry.key.clone(),
+                    from_tier: Some(entry.tier),
+                    to_tier: None,
+                    bytes: entry.bytes,
+                    estimated_us: 0,
+                })
+                .collect(),
+            resident: Vec::new(),
+            removed,
+        }
+    }
+
+    fn snapshot(&self) -> Vec<CacheResidency> {
+        self.tiers
+            .iter()
+            .map(|((worker_id, key), tier)| CacheResidency {
+                key: key.clone(),
+                worker_id: worker_id.clone(),
+                tier: *tier,
+                bytes: u64::from(key.token_count) * 128 * 1024,
+                last_access_ms: 0,
+                ref_count: 0,
+                pinned: false,
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TieredDataPlaneConfig {
+    pub hbm_capacity_bytes: u64,
+    pub cpu_dram_capacity_bytes: u64,
+    pub local_ssd_capacity_bytes: u64,
+}
+
+impl Default for TieredDataPlaneConfig {
+    fn default() -> Self {
+        Self {
+            hbm_capacity_bytes: 2 * 1024 * 1024 * 1024,
+            cpu_dram_capacity_bytes: 16 * 1024 * 1024 * 1024,
+            local_ssd_capacity_bytes: 128 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TierEntry {
+    residency: CacheResidency,
+    last_access: u64,
+}
+
+#[derive(Debug, Default)]
+struct TieredWorkerCache {
+    entries: HashMap<KvBlockKey, TierEntry>,
+    clock: u64,
+}
+
+#[derive(Debug)]
+pub struct TieredDataPlane {
+    config: TieredDataPlaneConfig,
+    workers: HashMap<String, TieredWorkerCache>,
+    cost: CostModel,
+    admits: u64,
+    hits: u64,
+    promotions: u64,
+    demotions: u64,
+    evictions: u64,
+}
+
+impl TieredDataPlane {
+    pub fn new(config: TieredDataPlaneConfig) -> Self {
+        Self {
+            config,
+            workers: HashMap::new(),
+            cost: CostModel::default(),
+            admits: 0,
+            hits: 0,
+            promotions: 0,
+            demotions: 0,
+            evictions: 0,
+        }
+    }
+
+    pub fn config(&self) -> TieredDataPlaneConfig {
+        self.config
+    }
+
+    fn capacity(&self, tier: CacheTier) -> u64 {
+        match tier {
+            CacheTier::Hbm => self.config.hbm_capacity_bytes,
+            CacheTier::CpuDram => self.config.cpu_dram_capacity_bytes,
+            CacheTier::LocalSsd => self.config.local_ssd_capacity_bytes,
+            CacheTier::RemoteHbm | CacheTier::ObjectStore => 0,
+        }
+    }
+
+    fn lower_tier(tier: CacheTier) -> Option<CacheTier> {
+        match tier {
+            CacheTier::Hbm => Some(CacheTier::CpuDram),
+            CacheTier::CpuDram => Some(CacheTier::LocalSsd),
+            CacheTier::LocalSsd => None,
+            CacheTier::RemoteHbm | CacheTier::ObjectStore => None,
+        }
+    }
+
+    fn tier_rank(tier: CacheTier) -> u8 {
+        match tier {
+            CacheTier::Hbm => 0,
+            CacheTier::RemoteHbm => 1,
+            CacheTier::CpuDram => 2,
+            CacheTier::LocalSsd => 3,
+            CacheTier::ObjectStore => 4,
+        }
+    }
+
+    fn tier_bytes(worker: &TieredWorkerCache, tier: CacheTier) -> u64 {
+        worker
+            .entries
+            .values()
+            .filter(|entry| entry.residency.tier == tier)
+            .map(|entry| entry.residency.bytes)
+            .sum()
+    }
+
+    fn coldest_in_tier(worker: &TieredWorkerCache, tier: CacheTier) -> Option<KvBlockKey> {
+        worker
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.residency.tier == tier)
+            .min_by_key(|(_, entry)| entry.last_access)
+            .map(|(key, _)| key.clone())
+    }
+
+    fn action(
+        &self,
+        kind: DataPlaneActionKind,
+        residency: &CacheResidency,
+        from_tier: Option<CacheTier>,
+        to_tier: Option<CacheTier>,
+    ) -> DataPlaneAction {
+        let estimated_us = to_tier
+            .or(from_tier)
+            .map(|tier| {
+                self.cost
+                    .transfer_cost_us(tier, residency.bytes, true, true)
+            })
+            .unwrap_or(0);
+        DataPlaneAction {
+            kind,
+            worker_id: residency.worker_id.clone(),
+            key: residency.key.clone(),
+            from_tier,
+            to_tier,
+            bytes: residency.bytes,
+            estimated_us,
+        }
+    }
+
+    fn enforce_capacity(
+        &mut self,
+        worker_id: &str,
+        worker: &mut TieredWorkerCache,
+        update: &mut DataPlaneUpdate,
+        affected: &mut HashSet<KvBlockKey>,
+    ) {
+        for tier in [CacheTier::Hbm, CacheTier::CpuDram, CacheTier::LocalSsd] {
+            while Self::tier_bytes(worker, tier) > self.capacity(tier) {
+                let Some(victim_key) = Self::coldest_in_tier(worker, tier) else {
+                    break;
+                };
+                let Some(mut victim) = worker.entries.remove(&victim_key) else {
+                    break;
+                };
+                affected.insert(victim_key.clone());
+
+                if let Some(next_tier) = Self::lower_tier(tier) {
+                    let old = victim.residency.clone();
+                    victim.residency.tier = next_tier;
+                    victim.residency.worker_id = worker_id.to_string();
+                    victim.last_access = worker.clock;
+                    worker.entries.insert(victim_key, victim.clone());
+                    update.actions.push(self.action(
+                        DataPlaneActionKind::Demote,
+                        &victim.residency,
+                        Some(old.tier),
+                        Some(next_tier),
+                    ));
+                    self.demotions += 1;
+                } else {
+                    update.actions.push(self.action(
+                        DataPlaneActionKind::Evict,
+                        &victim.residency,
+                        Some(victim.residency.tier),
+                        None,
+                    ));
+                    update.removed.push(victim.residency);
+                    self.evictions += 1;
+                }
+            }
+        }
+    }
+}
+
+impl Default for TieredDataPlane {
+    fn default() -> Self {
+        Self::new(TieredDataPlaneConfig::default())
+    }
+}
+
+impl DataPlane for TieredDataPlane {
+    fn name(&self) -> &str {
+        "tiered"
+    }
+
+    fn tier_of(&self, worker_id: &str, key: &KvBlockKey) -> Option<CacheTier> {
+        self.workers
+            .get(worker_id)?
+            .entries
+            .get(key)
+            .map(|entry| entry.residency.tier)
+    }
+
+    fn fetch_cost_us(&self, worker_id: &str, key: &KvBlockKey) -> Option<u64> {
+        let worker = self.workers.get(worker_id)?;
+        let entry = worker.entries.get(key)?;
+        Some(
+            self.cost
+                .transfer_cost_us(entry.residency.tier, entry.residency.bytes, true, true),
+        )
+    }
+
+    fn place(&mut self, mut residency: CacheResidency) -> DataPlaneUpdate {
+        let worker_id = residency.worker_id.clone();
+        let mut update = DataPlaneUpdate::default();
+        let mut affected = HashSet::new();
+        let action_seed = self.cost;
+        let mut worker = self.workers.remove(&worker_id).unwrap_or_default();
+        worker.clock += 1;
+        let target_tier = residency.tier;
+        residency.last_access_ms = worker.clock;
+        affected.insert(residency.key.clone());
+
+        let existing = worker.entries.remove(&residency.key);
+        match existing {
+            Some(existing) if existing.residency.tier == target_tier => {
+                self.hits += 1;
+                update.actions.push(DataPlaneAction {
+                    kind: DataPlaneActionKind::Hit,
+                    worker_id: worker_id.clone(),
+                    key: residency.key.clone(),
+                    from_tier: Some(target_tier),
+                    to_tier: Some(target_tier),
+                    bytes: residency.bytes,
+                    estimated_us: action_seed.transfer_cost_us(
+                        target_tier,
+                        residency.bytes,
+                        true,
+                        true,
+                    ),
+                });
+            }
+            Some(existing) => {
+                let kind =
+                    if Self::tier_rank(target_tier) < Self::tier_rank(existing.residency.tier) {
+                        self.promotions += 1;
+                        DataPlaneActionKind::Promote
+                    } else {
+                        self.demotions += 1;
+                        DataPlaneActionKind::Demote
+                    };
+                update.actions.push(DataPlaneAction {
+                    kind,
+                    worker_id: worker_id.clone(),
+                    key: residency.key.clone(),
+                    from_tier: Some(existing.residency.tier),
+                    to_tier: Some(target_tier),
+                    bytes: residency.bytes,
+                    estimated_us: action_seed.transfer_cost_us(
+                        existing.residency.tier,
+                        residency.bytes,
+                        true,
+                        true,
+                    ),
+                });
+            }
+            None => {
+                self.admits += 1;
+                update.actions.push(DataPlaneAction {
+                    kind: DataPlaneActionKind::Admit,
+                    worker_id: worker_id.clone(),
+                    key: residency.key.clone(),
+                    from_tier: None,
+                    to_tier: Some(target_tier),
+                    bytes: residency.bytes,
+                    estimated_us: 0,
+                });
+            }
+        }
+        worker.entries.insert(
+            residency.key.clone(),
+            TierEntry {
+                residency,
+                last_access: worker.clock,
+            },
+        );
+        self.enforce_capacity(&worker_id, &mut worker, &mut update, &mut affected);
+
+        update.resident = affected
+            .into_iter()
+            .filter_map(|key| {
+                worker
+                    .entries
+                    .get(&key)
+                    .map(|entry| entry.residency.clone())
+            })
+            .collect();
+        self.workers.insert(worker_id, worker);
+        update
+    }
+
+    fn remove_block(
+        &mut self,
+        scope: &IdentityScope,
+        worker_id: &str,
+        block_hash: &str,
+    ) -> DataPlaneUpdate {
+        let mut update = DataPlaneUpdate::default();
+        let Some(worker) = self.workers.get_mut(worker_id) else {
+            return update;
+        };
+        let keys = worker
+            .entries
+            .keys()
+            .filter(|key| key.block_hash == block_hash && scope.matches(key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(entry) = worker.entries.remove(&key) {
+                update.actions.push(DataPlaneAction {
+                    kind: DataPlaneActionKind::Remove,
+                    worker_id: worker_id.to_string(),
+                    key: entry.residency.key.clone(),
+                    from_tier: Some(entry.residency.tier),
+                    to_tier: None,
+                    bytes: entry.residency.bytes,
+                    estimated_us: 0,
+                });
+                update.removed.push(entry.residency);
+            }
+        }
+        update
+    }
+
+    fn clear_worker(&mut self, worker_id: &str) -> DataPlaneUpdate {
+        let Some(worker) = self.workers.remove(worker_id) else {
+            return DataPlaneUpdate::default();
+        };
+        let removed = worker
+            .entries
+            .into_values()
+            .map(|entry| entry.residency)
+            .collect::<Vec<_>>();
+        DataPlaneUpdate {
+            actions: removed
+                .iter()
+                .map(|entry| DataPlaneAction {
+                    kind: DataPlaneActionKind::Remove,
+                    worker_id: entry.worker_id.clone(),
+                    key: entry.key.clone(),
+                    from_tier: Some(entry.tier),
+                    to_tier: None,
+                    bytes: entry.bytes,
+                    estimated_us: 0,
+                })
+                .collect(),
+            resident: Vec::new(),
+            removed,
+        }
+    }
+
+    fn snapshot(&self) -> Vec<CacheResidency> {
+        self.workers
+            .values()
+            .flat_map(|worker| {
+                worker
+                    .entries
+                    .values()
+                    .map(|entry| entry.residency.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn metrics(&self) -> DataPlaneMetrics {
+        let snapshot = self.snapshot();
+        DataPlaneMetrics {
+            resident_blocks: snapshot.len() as u64,
+            resident_bytes: snapshot.iter().map(|entry| entry.bytes).sum(),
+            hbm_bytes: snapshot
+                .iter()
+                .filter(|entry| entry.tier == CacheTier::Hbm)
+                .map(|entry| entry.bytes)
+                .sum(),
+            cpu_dram_bytes: snapshot
+                .iter()
+                .filter(|entry| entry.tier == CacheTier::CpuDram)
+                .map(|entry| entry.bytes)
+                .sum(),
+            local_ssd_bytes: snapshot
+                .iter()
+                .filter(|entry| entry.tier == CacheTier::LocalSsd)
+                .map(|entry| entry.bytes)
+                .sum(),
+            admits: self.admits,
+            hits: self.hits,
+            promotions: self.promotions,
+            demotions: self.demotions,
+            evictions: self.evictions,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -850,6 +1495,62 @@ mod tests {
         assert!(dp.fetch_cost_us("w0", &key).unwrap() > 0);
         // A block placed nowhere is still unknown.
         assert_eq!(dp.tier_of("w1", &key), None);
+    }
+
+    #[test]
+    fn tiered_data_plane_demotes_and_evicts_under_capacity() {
+        let mut dp = TieredDataPlane::new(TieredDataPlaneConfig {
+            hbm_capacity_bytes: 100,
+            cpu_dram_capacity_bytes: 100,
+            local_ssd_capacity_bytes: 100,
+        });
+        let mk = |hash: &str| KvBlockKey::new("m", "t", "ten", "root", hash, 0, 64);
+
+        let a = dp.place(CacheResidency::hbm("w0", mk("a"), 100));
+        assert_eq!(a.actions[0].kind, DataPlaneActionKind::Admit);
+        assert_eq!(dp.tier_of("w0", &mk("a")), Some(CacheTier::Hbm));
+
+        let b = dp.place(CacheResidency::hbm("w0", mk("b"), 100));
+        assert_eq!(dp.tier_of("w0", &mk("b")), Some(CacheTier::Hbm));
+        assert_eq!(dp.tier_of("w0", &mk("a")), Some(CacheTier::CpuDram));
+        assert!(b
+            .actions
+            .iter()
+            .any(|action| action.kind == DataPlaneActionKind::Demote));
+
+        let _ = dp.place(CacheResidency::hbm("w0", mk("c"), 100));
+        assert_eq!(dp.tier_of("w0", &mk("b")), Some(CacheTier::CpuDram));
+        assert_eq!(dp.tier_of("w0", &mk("a")), Some(CacheTier::LocalSsd));
+
+        let d = dp.place(CacheResidency::hbm("w0", mk("d"), 100));
+        assert!(d
+            .actions
+            .iter()
+            .any(|action| action.kind == DataPlaneActionKind::Evict));
+        assert_eq!(dp.tier_of("w0", &mk("a")), None);
+        assert_eq!(dp.metrics().resident_blocks, 3);
+    }
+
+    #[test]
+    fn tiered_data_plane_promotes_lower_tier_hit() {
+        let mut dp = TieredDataPlane::new(TieredDataPlaneConfig {
+            hbm_capacity_bytes: 100,
+            cpu_dram_capacity_bytes: 200,
+            local_ssd_capacity_bytes: 0,
+        });
+        let a = KvBlockKey::new("m", "t", "ten", "root", "a", 0, 64);
+        let b = KvBlockKey::new("m", "t", "ten", "root", "b", 0, 64);
+        dp.place(CacheResidency::hbm("w0", a.clone(), 100));
+        dp.place(CacheResidency::hbm("w0", b, 100));
+        assert_eq!(dp.tier_of("w0", &a), Some(CacheTier::CpuDram));
+
+        let update = dp.place(CacheResidency::hbm("w0", a.clone(), 100));
+        assert!(update
+            .actions
+            .iter()
+            .any(|action| action.kind == DataPlaneActionKind::Promote));
+        assert_eq!(dp.tier_of("w0", &a), Some(CacheTier::Hbm));
+        assert_eq!(dp.metrics().promotions, 1);
     }
 
     fn mem_scope() -> IdentityScope {

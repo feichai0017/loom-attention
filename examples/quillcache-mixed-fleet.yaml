@@ -11,6 +11,7 @@ index_path: quillcache-residency
 engines:
   - id: vllm-a
     kind: Vllm
+    role: Aggregated
     base_url: http://127.0.0.1:8001
     model_id: Qwen/Qwen2.5-7B-Instruct
     tokenizer_id: Qwen/Qwen2.5-7B-Instruct
@@ -18,6 +19,7 @@ engines:
     locality_domain: rack-a
   - id: sglang-a
     kind: Sglang
+    role: Aggregated
     base_url: http://127.0.0.1:30000
     model_id: Qwen/Qwen2.5-7B-Instruct
     tokenizer_id: Qwen/Qwen2.5-7B-Instruct
