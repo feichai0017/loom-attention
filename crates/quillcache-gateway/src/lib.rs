@@ -11,7 +11,7 @@ use quillcache_core::{
 };
 use quillcache_router::{
     GreedyStatePlaneRouter, LeastLoadedRouter, PrefixAffinityRouter, RoundRobinRouter,
-    RoutingPolicy,
+    RoutingPolicy, SloAwareRouter,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -55,7 +55,8 @@ pub struct GatewayConfig {
     pub bind: SocketAddr,
     pub engines: Vec<EngineEndpoint>,
     /// Routing policy: "prefix-affinity" (cache-affine across the fleet),
-    /// "round-robin" (spread baseline), "least-loaded", or "greedy" (default).
+    /// "round-robin" (spread baseline), "least-loaded", "slo-aware" (SLO as a
+    /// near-hard constraint, cache-affine within it), or "greedy" (default).
     #[serde(default)]
     pub policy: Option<String>,
 }
@@ -135,6 +136,7 @@ fn build_policy(name: Option<&str>) -> Box<dyn RoutingPolicy> {
         "prefix-affinity" | "affinity" => Box::new(PrefixAffinityRouter::default()),
         "round-robin" | "roundrobin" => Box::new(RoundRobinRouter::default()),
         "least-loaded" | "load" => Box::new(LeastLoadedRouter::default()),
+        "slo-aware" | "slo" => Box::new(SloAwareRouter::default()),
         _ => Box::new(GreedyStatePlaneRouter::default()),
     }
 }
