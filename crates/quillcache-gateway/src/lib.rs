@@ -241,6 +241,16 @@ async fn proxy_openai_path(
     let upstream = request.send().await?;
     let status = StatusCode::from_u16(upstream.status().as_u16())
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+    // Close the residency loop: record where we placed this request's prefix
+    // blocks, so the next request for the same prefix sees them resident on this
+    // engine — cache-aware routing now works end-to-end without a KV-events
+    // bridge. (Tier 2 events later correct this inference on eviction.)
+    if status.is_success() {
+        let mut control = state.control.write().await;
+        control.observe_placement(&trace.engine_id, &request_shape, DEFAULT_BLOCK_BYTES);
+    }
+
     let mut response = Response::builder().status(status);
     for (name, value) in upstream.headers() {
         if should_return_header(name) {
@@ -324,25 +334,96 @@ fn request_shape_from_payload(payload: &mut Value) -> RequestShape {
     }
 }
 
+/// Inferred bytes per KV block when recording placement (no engine event yet to
+/// give the real size). 4 MiB ≈ a 64-token block for a mid-size model.
+const DEFAULT_BLOCK_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Approx. characters per fallback block (no tokenizer in the gateway, so we
+/// chunk prompt text). ~4 chars/token ⇒ ~64 tokens/block.
+const FALLBACK_BLOCK_CHARS: usize = 256;
+/// Cap fallback blocks per request so a huge prompt can't explode the index.
+const FALLBACK_MAX_BLOCKS: usize = 64;
+
+/// Derive prefix blocks from the request itself when the client sends no
+/// `quillcache` hints. Each block hash is **prefix-inclusive** (a hash of all
+/// prompt text up to and including the block), so two requests that share a
+/// leading prefix — e.g. the same system prompt or RAG context — produce the
+/// same leading block hashes and route cache-affinely. The diverging suffix (the
+/// user's question) only changes the trailing blocks. This is a tokenizer-free
+/// approximation of how engines hash KV blocks; precise hashes arrive via
+/// `quillcache` hints or `/v1/kv-events`.
 fn fallback_blocks(
     payload: &Value,
     model_id: &str,
     tokenizer_id: &str,
     tenant_id: &str,
 ) -> Vec<KvBlockKey> {
-    let mut hasher = DefaultHasher::new();
-    payload.to_string().hash(&mut hasher);
-    let block_hash = format!("fallback-{:016x}", hasher.finish());
-    vec![KvBlockKey::external_hash(ExternalKvBlockKey {
-        model_id: model_id.to_string(),
-        tokenizer_id: tokenizer_id.to_string(),
-        adapter_id: None,
-        tenant_id: tenant_id.to_string(),
-        prefix_hash: "root".to_string(),
-        block_hash,
-        block_index: 0,
-        token_count: 64,
-    })]
+    let text = prompt_text(payload);
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        let mut hasher = DefaultHasher::new();
+        payload.to_string().hash(&mut hasher);
+        return vec![KvBlockKey::external_hash(ExternalKvBlockKey {
+            model_id: model_id.to_string(),
+            tokenizer_id: tokenizer_id.to_string(),
+            adapter_id: None,
+            tenant_id: tenant_id.to_string(),
+            prefix_hash: "root".to_string(),
+            block_hash: format!("pfx-{:016x}", hasher.finish()),
+            block_index: 0,
+            token_count: 64,
+        })];
+    }
+
+    let mut blocks = Vec::new();
+    let mut parent = "root".to_string();
+    let mut start = 0usize;
+    let mut idx = 0u32;
+    while start < chars.len() && blocks.len() < FALLBACK_MAX_BLOCKS {
+        let end = (start + FALLBACK_BLOCK_CHARS).min(chars.len());
+        // Prefix-inclusive content hash: bind the whole chain up to `end`.
+        let prefix_text: String = chars[..end].iter().collect();
+        let mut hasher = DefaultHasher::new();
+        prefix_text.hash(&mut hasher);
+        let block_hash = format!("pfx-{:016x}", hasher.finish());
+        blocks.push(KvBlockKey::external_hash(ExternalKvBlockKey {
+            model_id: model_id.to_string(),
+            tokenizer_id: tokenizer_id.to_string(),
+            adapter_id: None,
+            tenant_id: tenant_id.to_string(),
+            prefix_hash: parent.clone(),
+            block_hash: block_hash.clone(),
+            block_index: idx,
+            token_count: ((end - start) as u32).div_ceil(4).max(1),
+        }));
+        parent = block_hash;
+        start = end;
+        idx += 1;
+    }
+    blocks
+}
+
+/// Flatten the request's prompt to text for fallback block hashing: chat
+/// `messages` become `role:content` lines; a completion `prompt` is used as-is.
+fn prompt_text(payload: &Value) -> String {
+    if let Some(messages) = payload.get("messages").and_then(Value::as_array) {
+        let mut text = String::new();
+        for message in messages {
+            if let Some(role) = message.get("role").and_then(Value::as_str) {
+                text.push_str(role);
+                text.push(':');
+            }
+            if let Some(content) = message.get("content").and_then(Value::as_str) {
+                text.push_str(content);
+                text.push('\n');
+            }
+        }
+        text
+    } else if let Some(prompt) = payload.get("prompt").and_then(Value::as_str) {
+        prompt.to_string()
+    } else {
+        payload.to_string()
+    }
 }
 
 fn fallback_request_id() -> String {
@@ -441,7 +522,38 @@ mod tests {
 
         assert_eq!(shape.model_id, "Qwen/Qwen3-0.6B");
         assert_eq!(shape.estimated_decode_tokens, 8);
+        // "hello" is one short block.
         assert_eq!(shape.blocks.len(), 1);
-        assert!(shape.blocks[0].block_hash.starts_with("fallback-"));
+        assert!(shape.blocks[0].block_hash.starts_with("pfx-"));
+    }
+
+    #[test]
+    fn shared_system_prompt_yields_shared_prefix_blocks() {
+        // A long shared system prompt (spans several fallback blocks) followed by
+        // a per-request user turn — the multi-tenant shared-prompt case.
+        let system = "You are a careful assistant. ".repeat(40);
+        let make = |question: &str| {
+            json!({
+                "model": "m",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": question}
+                ]
+            })
+        };
+        let mut a = make("What is 2 + 2?");
+        let mut b = make("Name a primary color.");
+        let sa = request_shape_from_payload(&mut a);
+        let sb = request_shape_from_payload(&mut b);
+
+        // The shared system prefix yields identical leading block hashes (the
+        // cache-affinity signal)...
+        assert!(sa.blocks.len() >= 2 && sb.blocks.len() >= 2);
+        assert_eq!(sa.blocks[0].block_hash, sb.blocks[0].block_hash);
+        // ...while the diverging user turn changes the trailing block.
+        assert_ne!(
+            sa.blocks.last().unwrap().block_hash,
+            sb.blocks.last().unwrap().block_hash
+        );
     }
 }

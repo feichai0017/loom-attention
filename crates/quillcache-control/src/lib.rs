@@ -205,6 +205,24 @@ impl ControlPlane {
             .map_err(ControlError::from)
     }
 
+    /// Record that a request's blocks were placed on `engine_id` — *inferred*
+    /// residency from the control plane's own routing decision. This closes the
+    /// online loop: the engine runs with prefix caching, so after it serves a
+    /// request its prefix blocks are resident there, and the next request for the
+    /// same prefix should see a local hit. Without this the index only learns
+    /// from `/v1/kv-events`, so cache-aware routing is blind until a bridge is
+    /// wired. KV events (Tier 2) later *correct* this inference (e.g. on
+    /// eviction); inferred residency is the floor, ground truth the upgrade.
+    pub fn observe_placement(&mut self, engine_id: &str, request: &RequestShape, block_bytes: u64) {
+        for block in &request.blocks {
+            self.residency.put(CacheResidency::hbm(
+                engine_id.to_string(),
+                block.clone(),
+                block_bytes,
+            ));
+        }
+    }
+
     pub fn ingest(&mut self, batch: KvEventBatch) -> Result<IngestSummary, ControlError> {
         ingest_batch(self.residency.as_mut(), batch, &self.engines)
     }
@@ -332,6 +350,52 @@ mod tests {
         let decision = control.route(&request).unwrap();
         assert_eq!(decision.worker_id, "vllm-b");
         assert_eq!(decision.local_hits.len(), 1);
+    }
+
+    #[test]
+    fn observe_placement_closes_the_routing_loop() {
+        let mut control = ControlPlane::new(vec![
+            engine(),
+            EngineEndpoint {
+                id: "vllm-b".to_string(),
+                base_url: "http://127.0.0.1:8002".to_string(),
+                ..engine()
+            },
+        ]);
+
+        let block = KvBlockKey::external_hash(ExternalKvBlockKey {
+            model_id: "Qwen/Qwen3-0.6B".to_string(),
+            tokenizer_id: "Qwen/Qwen3-0.6B".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant-a".to_string(),
+            prefix_hash: "root".to_string(),
+            block_hash: "shared-prefix".to_string(),
+            block_index: 0,
+            token_count: 64,
+        });
+        let request = RequestShape {
+            id: "req-1".to_string(),
+            model_id: "Qwen/Qwen3-0.6B".to_string(),
+            tokenizer_id: "Qwen/Qwen3-0.6B".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant-a".to_string(),
+            blocks: vec![block],
+            estimated_decode_tokens: 16,
+            slo: SloTarget::default(),
+        };
+
+        // Cold index: the first request has no local hit anywhere.
+        let first = control.route(&request).unwrap();
+        assert_eq!(first.local_hits.len(), 0);
+
+        // The gateway records where it placed the blocks...
+        control.observe_placement(&first.worker_id, &request, 4 * 1024 * 1024);
+
+        // ...so a second request for the same prefix now lands on that engine
+        // with a real local hit — without any /v1/kv-events traffic.
+        let second = control.route(&request).unwrap();
+        assert_eq!(second.worker_id, first.worker_id);
+        assert_eq!(second.local_hits.len(), 1);
     }
 
     #[test]
