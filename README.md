@@ -2,9 +2,13 @@
 
 [![ci](https://github.com/feichai0017/quillcache/actions/workflows/ci.yml/badge.svg)](https://github.com/feichai0017/quillcache/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![page](https://img.shields.io/badge/page-quillcache-5ee0c0.svg)](https://feichai0017.github.io/quillcache/)
+[![crates.io](https://img.shields.io/badge/crates.io-quillcache-orange.svg)](https://crates.io/crates/quillcache)
 
 > **QuillCache is a research platform and control-plane prototype for
 > identity-aware, persistent, and policy-driven KV cache reuse in LLM serving.**
+
+**▶ Overview & results: [feichai0017.github.io/quillcache](https://feichai0017.github.io/quillcache/)**
 
 QuillCache is a **vendor-neutral KV cache control plane and evaluation platform**
 for LLM inference. It does not run models and it does not move KV tensors. It
