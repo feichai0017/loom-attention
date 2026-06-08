@@ -2,6 +2,7 @@ use quillcache_core::{
     CacheResidency, CacheTier, CostModel, KvBlockKey, RequestShape, WorkerState,
 };
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -359,6 +360,82 @@ impl RoutingPolicy for RoundRobinRouter {
     }
 }
 
+/// SLO-aware, cache/session-affine policy: treat the TTFT/TPOT SLO as a
+/// near-hard constraint. Among workers that **meet** the SLO budget, pick the one
+/// with the most **local** cache hits — KV already resident in that engine's HBM
+/// (true session affinity, no transfer), which with the closed residency loop is
+/// the engine that already served this session — tie-breaking on latency. Only
+/// when **no** worker can meet the SLO does it fall back to the least-violating.
+///
+/// This differs from [`GreedyStatePlaneRouter`], which blends latency and reuse
+/// into one additive score and will pull a session's KV across engines (a cheap
+/// intra-domain transfer) to chase marginally lower latency, even while the
+/// engine holding it locally was meeting the SLO. SLO-aware keeps the session on
+/// its warm engine — no KV movement, higher fleet-wide local hit rate — until
+/// load actually threatens the SLO, then spills to protect tail latency.
+#[derive(Debug, Clone, Default)]
+pub struct SloAwareRouter {
+    cost_model: CostModel,
+}
+
+impl SloAwareRouter {
+    pub fn new(cost_model: CostModel) -> Self {
+        Self { cost_model }
+    }
+}
+
+impl RoutingPolicy for SloAwareRouter {
+    fn name(&self) -> &str {
+        "slo-aware"
+    }
+
+    fn route(
+        &self,
+        request: &RequestShape,
+        workers: &[WorkerState],
+        residency: &[CacheResidency],
+    ) -> Result<RouteDecision, RouterError> {
+        if workers.is_empty() {
+            return Err(RouterError::NoWorkers);
+        }
+        let worker_by_id: HashMap<&str, &WorkerState> = workers
+            .iter()
+            .map(|worker| (worker.id.as_str(), worker))
+            .collect();
+        let plans: Vec<RouteDecision> = workers
+            .iter()
+            .map(|worker| {
+                plan_for_worker(&self.cost_model, request, worker, &worker_by_id, residency)
+            })
+            .collect();
+
+        // Among SLO-feasible workers, maximize *local* cache hits — KV already in
+        // that engine's HBM (true session affinity, zero transfer), not blocks it
+        // would pull over the network — tie-breaking on lowest TTFT.
+        let feasible = plans
+            .iter()
+            .filter(|decision| decision.slo_violation_us == 0)
+            .max_by_key(|decision| {
+                (
+                    decision.local_hits.len(),
+                    Reverse(decision.estimated_ttft_us),
+                )
+            });
+
+        // If none can meet the SLO, take the least-violating (tie-break: most local hits).
+        let chosen = feasible.or_else(|| {
+            plans.iter().min_by_key(|decision| {
+                (
+                    decision.slo_violation_us,
+                    Reverse(decision.local_hits.len()),
+                )
+            })
+        });
+
+        Ok(chosen.expect("plans is non-empty").clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +533,59 @@ mod tests {
                 .worker_id,
             "w1"
         );
+    }
+
+    #[test]
+    fn slo_aware_keeps_affinity_while_greedy_chases_latency() {
+        // w0 is cold but fast; w1 holds the session's block but carries modest
+        // queue load, making it marginally slower — yet still within the SLO.
+        let request = request_with_shared_block();
+        let workers = vec![
+            WorkerState::new("w0", "rack-a"),
+            WorkerState::new("w1", "rack-a").with_load(2_000, 0),
+        ];
+        let residency = vec![CacheResidency::hbm(
+            "w1",
+            request.blocks[0].clone(),
+            4 * 1024 * 1024,
+        )];
+
+        // SLO-aware keeps the session local on the warm engine (both meet the
+        // SLO; w1 has the KV in HBM, zero transfer)...
+        let slo = SloAwareRouter::default()
+            .route(&request, &workers, &residency)
+            .unwrap();
+        assert_eq!(slo.worker_id, "w1");
+        assert_eq!(slo.local_hits.len(), 1);
+
+        // ...while greedy pulls the KV to the faster cold engine (cheap
+        // intra-domain transfer), moving the session off its warm engine.
+        let greedy = GreedyStatePlaneRouter::default()
+            .route(&request, &workers, &residency)
+            .unwrap();
+        assert_eq!(greedy.worker_id, "w0");
+        assert_eq!(greedy.transfers.len(), 1);
+    }
+
+    #[test]
+    fn slo_aware_spills_off_a_warm_engine_that_would_violate_slo() {
+        // w1 holds the block but is badly overloaded — its queue blows the TTFT
+        // SLO — so the guard must spill to the cold-but-feasible w0.
+        let request = request_with_shared_block();
+        let workers = vec![
+            WorkerState::new("w0", "rack-a"),
+            WorkerState::new("w1", "rack-a").with_load(250_000, 0),
+        ];
+        let residency = vec![CacheResidency::hbm(
+            "w1",
+            request.blocks[0].clone(),
+            4 * 1024 * 1024,
+        )];
+
+        let decision = SloAwareRouter::default()
+            .route(&request, &workers, &residency)
+            .unwrap();
+        assert_eq!(decision.worker_id, "w0");
+        assert!(decision.recomputes.len() == 1 || !decision.transfers.is_empty());
     }
 }
