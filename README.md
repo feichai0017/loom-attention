@@ -247,6 +247,7 @@ exact block hashes while keeping the upstream request clean. See
 ## Status (v0.1)
 
 - ✅ OpenAI-compatible gateway with cache-aware routing and decision headers.
+- ✅ **Closed online residency loop**: the gateway records inferred placement from its own routing decisions and derives prefix blocks from the prompt, so cache-aware routing works end-to-end without a KV-events bridge (verified live: a 2nd request sharing a system prompt routes to the same engine with a real local hit). KV events (Tier 2) upgrade inferred residency to ground truth.
 - ✅ Vendor-neutral `/v1/kv-events` ingest (vLLM BlockStored / BlockRemoved / AllBlocksCleared shape).
 - ✅ Single `IndexBackend` seam with an in-memory reference backend + identity-aware prefix scan.
 - ✅ Pluggable `RoutingPolicy` with a load-only baseline and a cache-aware policy.
