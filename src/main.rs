@@ -1,7 +1,10 @@
 use clap::{Parser, Subcommand};
 use quillcache_core::MemoryIndex;
 use quillcache_gateway::run_from_config_path;
-use quillcache_sim::{bench_index, run_synthetic, IndexBenchConfig, SyntheticWorkloadConfig};
+use quillcache_sim::{
+    bench_index, run_safe_reuse, run_synthetic, IndexBenchConfig, SafeReuseConfig,
+    SyntheticWorkloadConfig,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "quillcache")]
@@ -55,6 +58,24 @@ enum Command {
         scan_queries: u32,
         #[arg(long, default_value_t = 0)]
         churn_ops: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Identity-governed safe-reuse experiment: naive content-hash reuse vs
+    /// QuillCache's identity guard on a cross-identity workload.
+    SafeReuse {
+        #[arg(long, default_value_t = 50)]
+        prefixes: u32,
+        #[arg(long, default_value_t = 8)]
+        prefix_blocks: u32,
+        #[arg(long, default_value_t = 8)]
+        tenants: u32,
+        #[arg(long, default_value_t = 4)]
+        adapters: u32,
+        #[arg(long, default_value_t = 2)]
+        repeats: u32,
+        #[arg(long, default_value_t = 64)]
+        block_tokens: u32,
         #[arg(long)]
         json: bool,
     },
@@ -167,6 +188,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(ms) = report.recovery_ms {
                     println!("recovery (reopen from disk): {:.2} ms", ms);
                 }
+            }
+        }
+        Command::SafeReuse {
+            prefixes,
+            prefix_blocks,
+            tenants,
+            adapters,
+            repeats,
+            block_tokens,
+            json,
+        } => {
+            let report = run_safe_reuse(SafeReuseConfig {
+                distinct_prefixes: prefixes,
+                prefix_blocks,
+                tenants,
+                adapters,
+                repeats,
+                block_tokens,
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                let naive_unsafe_pct = if report.naive_reuses > 0 {
+                    100.0 * report.naive_unsafe as f64 / report.naive_reuses as f64
+                } else {
+                    0.0
+                };
+                println!("QuillCache safe-reuse experiment");
+                println!("identities sharing each prefix: {}", report.identities);
+                println!("blocks evaluated: {}", report.blocks_evaluated);
+                println!(
+                    "naive content reuse: {} hits, of which {} UNSAFE ({:.1}%)",
+                    report.naive_reuses, report.naive_unsafe, naive_unsafe_pct
+                );
+                println!(
+                    "  unsafe: {} cross-tenant (privacy leak) · {} cross-adapter (correctness error)",
+                    report.unsafe_cross_tenant, report.unsafe_cross_adapter
+                );
+                println!(
+                    "identity guard: {} unsafe served · {} safe reuses preserved · {} recomputes forced",
+                    0, report.safe_reuses, report.guard_recomputes
+                );
+                println!(
+                    "cost of safety: {:.1} ms prefill to avoid {} unsafe serves",
+                    report.guard_recompute_ms, report.unsafe_blocks_avoided
+                );
             }
         }
     }

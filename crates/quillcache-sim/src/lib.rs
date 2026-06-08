@@ -9,6 +9,9 @@ use thiserror::Error;
 pub mod index_bench;
 pub use index_bench::{bench_index, IndexBenchConfig, IndexBenchReport};
 
+pub mod safe_reuse;
+pub use safe_reuse::{run_safe_reuse, SafeReuseConfig, SafeReuseReport};
+
 #[derive(Debug, Error)]
 pub enum SimError {
     #[error(transparent)]
