@@ -34,6 +34,22 @@ use tokio::sync::broadcast;
 pub mod transfer;
 pub use transfer::*;
 
+// The Mooncake-`store`-aligned data plane (Phase 2): object/replica model, the
+// per-segment buffer allocator, and the replica placement strategy. The
+// MasterService (two-phase Put) and Client are built on these next.
+pub mod allocation_strategy;
+pub mod allocator;
+pub mod replica;
+pub mod types;
+
+pub use allocation_strategy::{
+    create_allocation_strategy, AllocationStrategy, FreeRatioFirstAllocationStrategy,
+    RandomAllocationStrategy,
+};
+pub use allocator::{AllocatedBuffer, BufferAllocator, OffsetBufferAllocator};
+pub use replica::{Replica, ReplicaData, ReplicaList, ReplicaStatus};
+pub use types::{ErrorCode, ObjectKey, ReplicaId, ReplicateConfig, SegmentName, Slice};
+
 // =====================================================================
 // LocalKvStore — the real KV byte pool (DRAM + SSD), identity-guarded.
 // =====================================================================
