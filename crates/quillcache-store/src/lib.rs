@@ -41,6 +41,8 @@ pub mod allocation_strategy;
 pub mod allocator;
 pub mod client;
 pub mod disk_tier;
+#[cfg(feature = "etcd")]
+pub mod master_election;
 pub mod master_service;
 pub mod replica;
 pub mod types;
@@ -52,7 +54,9 @@ pub use allocation_strategy::{
 pub use allocator::{AllocatedBuffer, BufferAllocator, OffsetBufferAllocator};
 pub use client::{DummyClient, RealClient};
 pub use disk_tier::DiskTier;
-pub use master_service::MasterService;
+#[cfg(feature = "etcd")]
+pub use master_election::{Leadership, MasterElection};
+pub use master_service::{MasterService, MasterSnapshot, ObjectSnapshot, SegmentSnapshot};
 pub use replica::{Replica, ReplicaData, ReplicaList, ReplicaStatus};
 pub use types::{ErrorCode, ObjectKey, ReplicaId, ReplicateConfig, SegmentName, Slice};
 

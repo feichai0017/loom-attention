@@ -81,10 +81,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Compile + lint the etcd backend (the integration test is #[ignore]: it
-      # needs a running etcd, so CI does not run it).
+      # Compile + lint the etcd backends — the transfer-engine metadata backend
+      # and the store master's leader election. Both integration tests are
+      # #[ignore] (they need a running etcd), so CI only compile-checks them.
       - name: clippy + compile-check
-        run: cargo clippy -p quillcache-transfer-engine --features etcd --all-targets -- -D warnings
+        run: |
+          cargo clippy -p quillcache-transfer-engine --features etcd --all-targets -- -D warnings
+          cargo clippy -p quillcache-store --features etcd --all-targets -- -D warnings
 
   cuda:
     name: cuda device tier (compile-check)

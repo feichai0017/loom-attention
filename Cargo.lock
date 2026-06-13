@@ -1355,6 +1355,7 @@ version = "1.0.0-alpha.1"
 dependencies = [
  "bytes",
  "crc32fast",
+ "etcd-client",
  "quillcache-core",
  "quillcache-transfer-engine",
  "serde",

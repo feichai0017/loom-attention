@@ -57,7 +57,7 @@ differentiation on top:
 | --- | --- | --- |
 | Transfer Engine (`TransferEngine` + `Transport`; host **& GPU HBM** segments) | `quillcache-transfer-engine` (`engine` · `transport::{tcp,rdma,nvlink}` · `device_segment`) | ✅ TCP · ✅ **GPU HBM segment** (L4) / ⊙ RDMA · NVLink reserved |
 | Store `Client` (`PutStart`/`PutEnd`/`Get`) | `DummyClient` / `RealClient` | ✅ end-to-end over the transfer engine |
-| Store `MasterService` (two-phase Put, eviction) | `MasterService` | ✅ replica alloc · lease eviction |
+| Store `MasterService` (two-phase Put, eviction, **HA**) | `MasterService` + snapshot/recovery + heartbeat health + `MasterElection` | ✅ alloc · lease evict · **crash-safe snapshot + failover** · etcd leader-election (verified) |
 | `BufferAllocator` + `AllocationStrategy` | `OffsetBufferAllocator` + `Random`/`FreeRatioFirst` | ✅ |
 | `TransferMetadata` (etcd/redis/http/p2p) | `MetadataBackend`: `InMemoryMetadata` / `EtcdMetadata` (feature `etcd`) | ✅ in-memory · ✅ etcd (verified vs real etcd) |
 | Dynamo KV-router cost function | `DynamoCostRouter` | ✅ reproduces the worked example |
@@ -97,7 +97,11 @@ how far each piece is integrated:
   (behind `etcd` — real etcd-client code + a background-watch-synced cache,
   compile-checked in CI and **verified against a real etcd in Docker**: two
   backends discover a segment via the etcd watch; the integration test is
-  `#[ignore]` since CI has no etcd).
+  `#[ignore]` since CI has no etcd). The **master's HA** rides the same seam:
+  `MasterService` snapshot/recovery (atomic) + heartbeat segment-health are unit
+  tested, and `MasterElection` (multi-master etcd leader election + lease
+  failover, `--features etcd`) is **verified against a real etcd in Docker**
+  (`#[ignore]`).
 - **◑ real, behind a feature / verified on a GPU** — the CUDA device tier
   (`quillcache-cuda --features cuda`: HBM↔host H2D/D2H, FP8 quantize via NVRTC) and
   the Transfer Engine **GPU HBM device segment** (`quillcache-transfer-engine
@@ -109,7 +113,7 @@ how far each piece is integrated:
   `rdma` / `nvlink`): GPUDirect-RDMA / NVLink *zero-copy* needs a NIC / multi-GPU.
   Real interfaces, stubbed so the default build stays hardware-free.
 
-`cargo test` — 68 tests pass; `cargo fmt --check` and `cargo clippy` are clean. The
+`cargo test` — 72 tests pass; `cargo fmt --check` and `cargo clippy` are clean. The
 CUDA paths add 2 GPU tests (`#[ignore]`, L4-verified) and a `--features cuda`
 compile-check job in CI.
 
