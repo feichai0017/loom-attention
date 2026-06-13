@@ -1,12 +1,9 @@
-# QuillCache gateway in front of a 2-vLLM fleet on Modal L4, using the
-# Dynamo-style KV-router cost function. Swap `policy:` to round-robin for the
-# cache-blind baseline. Warm both engines first (bench/run_trace.py --warmup-urls)
-# so the measured TTFT is steady-state, not Modal scale-to-zero cold start.
+# Cache-blind baseline: same 2-engine Modal fleet, round-robin routing, no
+# Conductor. Contrast against quillcache-modal.yaml (dynamo-cost + conductor) to
+# show what cache-affine routing buys on a shared-prefix workload.
 bind: 127.0.0.1:8080
-policy: dynamo-cost
-# Route via the Mooncake Conductor (PrefixCacheTable + the Dynamo cost), fed by
-# inferred placement — the P3 path. Set false to use the residency-snapshot router.
-conductor: true
+policy: round-robin
+conductor: false
 engines:
   - id: modal-vllm-a
     kind: Vllm
