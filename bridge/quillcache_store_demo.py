@@ -1,15 +1,16 @@
-"""A vLLM KV connector on the Mooncake-faithful QuillCache store. SKELETON.
+"""No-GPU demo of the QuillCache store offload/load path.
+
+NOTE: this is NOT the vLLM connector — the real `KVConnectorBase_V1` implementation
+is `bridge/quillcache_v1_connector.py` (GPU-verified on Modal). This file is a
+minimal, GPU-free illustration of the store data path that connector rides:
 
 - offload (prefill done): `master.put_start` → WRITE each replica's bytes to its
   `(segment, offset)` over the transfer engine → `master.put_end`.
 - load (prefix hit): `master.get_replica_list` — **identity-guarded**, refused
   before any byte moves — → READ a replica over the transfer engine.
 
-The store master + the transfer wire are REAL: run `quillcache store-master` +
-`quillcache transfer-node` (see docs/real-engine-pool.md) and the offload/load
-round-trip works with no GPU. What needs a GPU + a pinned vLLM version is the
-`KVConnectorBase_V1` hooks + the KV-tensor (de)serialization — left as documented
-TODOs at the bottom.
+Run `quillcache store-master` + `quillcache transfer-node` (see
+docs/real-engine-pool.md) and the offload/load round-trip below works with no GPU.
 """
 
 from quillcache_store_client import StoreMasterClient, TransferEngineClient, identity

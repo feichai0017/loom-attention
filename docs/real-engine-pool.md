@@ -12,7 +12,9 @@ The pieces (all in this repo):
 | `quillcache store-master` | the `MasterService` over HTTP — two-phase Put, identity-guarded Get, Mount (`src/store_master_http.rs`) |
 | `quillcache transfer-node` | a Transfer Engine storage node serving one named RAM segment over the `(segment, offset)` wire (`src/transfer_node.rs`) |
 | `bridge/quillcache_store_client.py` | stdlib client: the store master (HTTP) + the transfer wire (TCP) |
-| `bridge/vllm_quillcache_connector.py` | a vLLM KV-connector skeleton on the above |
+| `bridge/quillcache_v1_connector.py` | the **real** vLLM 0.22.1 `KVConnectorBase_V1` on the store (GPU-verified) |
+| `bridge/quillcache_store_demo.py` | a no-GPU demo of the store offload/load path |
+| `quillcache pd-proxy` | orchestrates prefill → store → decode across two engines (`src/pd_proxy.rs`) |
 
 The flow is Mooncake's: **put** = `put_start` (master allocates replica buffers)
 → WRITE the bytes to each `(segment, offset)` over the transfer engine →
@@ -32,8 +34,8 @@ cargo run -- transfer-node --addr 127.0.0.1:8100 --segment seg-0
 # 2) the store master — metadata, two-phase Put, the identity guard
 cargo run -- store-master --addr 127.0.0.1:7777
 
-# 3) the connector demo — offload a block, load it back through the store
-python3 bridge/vllm_quillcache_connector.py     # run from the bridge/ dir
+# 3) the store demo — offload a block, load it back through the store (no GPU)
+python3 bridge/quillcache_store_demo.py          # run from the bridge/ dir
 #   -> loaded back: b'fake-kv-bytes-over-the-faithful-store'
 curl -s http://127.0.0.1:7777/v1/state
 #   -> {"objects":1,"segments":1,"capacity":...,"allocated":37}
@@ -44,36 +46,37 @@ connector's `segment_endpoints` + `--replica-num 2`) and a Put replicates across
 distinct segments. A Get under a different `tenant_id` is refused with HTTP 403
 (the identity guard, over the wire).
 
-## On a GPU (Modal) — wire the connector to vLLM
+## On a GPU (Modal) — the connector is real and verified
 
-The connector's store logic (put_start → transfer WRITE → put_end; get_replica_list
-→ transfer READ; identity guard) is real and tested above. What needs a real
-GPU + a pinned vLLM version is the **KV-tensor (de)serialization** and the
-`KVConnectorBase_V1` **hook signatures** — documented TODOs in
-`bridge/vllm_quillcache_connector.py`:
+The vLLM `KVConnectorBase_V1` implementation (`bridge/quillcache_v1_connector.py`)
+is written against the deployed vLLM 0.22.1 API and **verified on a Modal L4**:
 
-1. Run `store-master` somewhere reachable, and a `transfer-node` co-located with
-   each vLLM worker (same box → `localhost`, no network hop for the warm path).
-2. Register `QuillCacheConnector` as the vLLM KV connector; wire its hooks:
-   - `save_kv_layer` → `offload(block_key, kv_bytes)` (quantize to FP8 to match
-     `quillcache-cuda`'s device tier);
-   - `start_load_kv` → `load(block_key)` (copy pool bytes into vLLM's paged-KV);
-   - `get_num_new_matched_tokens` → how many prefix tokens the store can serve, so
-     the scheduler skips recomputing that prefix.
-3. Measure prefix-cache **hit rate** + **TTFT** with the connector on vs off, under
-   a shared-prefix workload (`bench/run_trace.py`).
+- `deploy/modal_vllm_connector_check.py` — 5/5 conformance: vLLM's own
+  `KVConnectorFactory` loads the connector via `kv_connector_module_path`.
+- `deploy/modal_vllm_connector.py` — single-engine e2e: request-1 offloads a
+  496-token prefix to the store (`QC committed`), request-2 reuses it
+  (`QC loading`); prefix caching off, so the reuse can only come from the store.
+- `deploy/modal_vllm_pd.py` — disaggregated P/D on a 2-GPU box: one request
+  through `quillcache pd-proxy` warms the store on GPU 0 (prefill) and reuses it
+  on GPU 1 (decode). KV computed on one instance, reused by another, via the store.
+
+The connector keeps vLLM's paged-KV slot-mapping extract/inject verbatim (correct
+per attention backend) and swaps disk-safetensors for the identity-guarded store.
 
 ## Status — what's real vs what needs hardware
 
 | piece | status |
 | --- | --- |
-| `store-master` (MasterService over HTTP) | **real, tested** (`cargo test`) |
+| `store-master` (MasterService over HTTP; **HA**: snapshot recovery + heartbeat + etcd leader election) | **real, tested** — HA verified locally + vs Docker etcd |
 | `transfer-node` (Transfer Engine segment server) | **real, tested** (the engine's TCP round-trip) |
 | `quillcache_store_client.py` (master HTTP + transfer wire) | **real, tested** (the local e2e above) |
 | connector offload / load (two-phase Put, identity-guarded Get) | **real, tested** (the local e2e above) |
-| vLLM `KVConnectorBase_V1` hooks + KV-tensor (de)serialization | **skeleton** — wire to your vLLM + GPU |
-| RDMA / GPUDirect transfer (vs the TCP wire) | **reserved** — `--features rdma/nvlink`, needs a NIC/GPU |
+| vLLM `KVConnectorBase_V1` connector + KV-tensor (de)serialization | **real, L4-verified** (`deploy/modal_vllm_connector.py`) |
+| disaggregated P/D (prefill → store → decode via `pd-proxy`) | **real, 2×L4-verified** (`deploy/modal_vllm_pd.py`) |
+| multi-node (store on a separate node) | **code-ready** — `master_url` / `segment_endpoints` are arbitrary `host:port`, and the TCP byte path is identical to localhost; only Modal cross-container plumbing (tunnels) remains |
+| RDMA / GPUDirect transfer (vs the TCP wire) | **reserved** — `--features rdma/nvlink`, needs a NIC / multi-GPU |
 
-This mirrors the project's honesty rule: the store + the byte-moving transfer
-engine + the connector path are real and verified on a laptop; the GPU-resident
-tensor plumbing is a clearly-marked seam you complete on your own hardware.
+This mirrors the project's honesty rule: the store, the byte-moving transfer
+engine, the connector, master HA, and disaggregated P/D are real and verified
+(laptop / Docker etcd / Modal L4); zero-copy RDMA/GPUDirect is the clearly-marked
+seam that needs a NIC or multi-GPU.
