@@ -9,7 +9,7 @@ read end-to-end and measure.
 
 | Mooncake / Dynamo | QuillCache | Status |
 | --- | --- | --- |
-| Transfer Engine (`TransferEngine` + `Transport`) | `quillcache-transfer-engine` (`engine` + `transport::{tcp,rdma,nvlink}`) | ✅ TCP · ✅ **one-sided RDMA Transport** (`RdmaTransport` read/write + `serve_rdma_segment`, `ibverbs`, end-to-end verified over SoftRoCE) / ⊙ real-NIC perf |
+| Transfer Engine (`TransferEngine` + `Transport` + `MultiTransport.selectTransport`) | `quillcache-transfer-engine` (`engine` + `transport::{tcp,rdma,nvlink}` + `MultiTransport::select_best`) | ✅ TCP · ✅ **one-sided RDMA Transport** (`ibverbs`, **pooled QPs**, end-to-end verified over SoftRoCE — 10× from QP reuse) · ✅ topology-aware backend select (RDMA over TCP) / ⊙ real-NIC perf |
 | Store `Client` (`PutStart`/`PutEnd`/`Get`) | `DummyClient` / `RealClient` | ✅ end-to-end over the transfer engine |
 | Store `MasterService` (two-phase Put, eviction, **HA**, batch) | `MasterService` | ✅ replica alloc · lease eviction · **HA** (snapshot + heartbeat + etcd election) · **batch Put/Get** |
 | `BufferAllocator` + `AllocationStrategy` | `OffsetBufferAllocator` + **`BinnedBufferAllocator` (O(1) size-binned)** + `Random`/`FreeRatioFirst` | ✅ |

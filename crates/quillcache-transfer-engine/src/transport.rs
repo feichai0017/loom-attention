@@ -59,6 +59,18 @@ impl LinkClass {
             LinkClass::Tcp => "tcp",
         }
     }
+
+    /// Preference rank for topology-aware selection — lower is faster/cheaper
+    /// (HBM-local < NVLink < RDMA < TCP), the store's link cost order. Drives
+    /// [`crate::multi_transport::MultiTransport::select_best`].
+    pub fn rank(self) -> u8 {
+        match self {
+            LinkClass::LocalShm => 0,
+            LinkClass::Nvlink => 1,
+            LinkClass::RdmaIb | LinkClass::RdmaRoce => 2,
+            LinkClass::Tcp => 3,
+        }
+    }
 }
 
 /// A one-sided transfer between local registered memory (`source_offset` in this
