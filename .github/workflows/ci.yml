@@ -88,6 +88,7 @@ jobs:
         run: |
           cargo clippy -p quillcache-transfer-engine --features etcd --all-targets -- -D warnings
           cargo clippy -p quillcache-store --features etcd --all-targets -- -D warnings
+          cargo clippy -p quillcache --features etcd -- -D warnings
 
   cuda:
     name: cuda device tier (compile-check)

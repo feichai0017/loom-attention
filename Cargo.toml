@@ -68,3 +68,6 @@ rocksdb = ["quillcache-core/rocksdb"]
 # the installed binary minimal. Also lets the online gateway back its residency
 # index with Holt (`index: holt` in the gateway config).
 holt = ["quillcache-core/holt"]
+# Multi-master HA for the store-master binary: etcd leader election. Forwards to
+# quillcache-store's etcd feature (pulls etcd-client, build needs protoc).
+etcd = ["quillcache-store/etcd"]

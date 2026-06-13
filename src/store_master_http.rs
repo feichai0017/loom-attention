@@ -23,6 +23,7 @@ use quillcache_store::{AllocatedBuffer, ErrorCode, MasterService, Replica, Repli
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::TcpListener;
 
 type Shared = Arc<Mutex<MasterService>>;
@@ -82,12 +83,19 @@ struct GetResp {
     replicas: Vec<Replica>,
 }
 
+#[derive(Deserialize)]
+struct SegmentReq {
+    segment: String,
+}
+
 #[derive(Serialize)]
 struct StateResp {
     objects: usize,
     segments: usize,
     capacity: u64,
     allocated: u64,
+    /// Segments whose node has missed heartbeats past the TTL (failure detection).
+    dead_segments: Vec<String>,
 }
 
 async fn mount(State(master): State<Shared>, Json(req): Json<MountReq>) -> Json<bool> {
@@ -155,6 +163,19 @@ async fn remove(
     Ok(Json(true))
 }
 
+/// Record a liveness heartbeat from a segment's node (Mooncake's client heartbeats).
+async fn heartbeat(
+    State(master): State<Shared>,
+    Json(req): Json<SegmentReq>,
+) -> Result<Json<bool>, (StatusCode, String)> {
+    master
+        .lock()
+        .unwrap()
+        .heartbeat(&req.segment)
+        .map_err(http_err)?;
+    Ok(Json(true))
+}
+
 async fn state(State(master): State<Shared>) -> Json<StateResp> {
     let master = master.lock().unwrap();
     Json(StateResp {
@@ -162,6 +183,7 @@ async fn state(State(master): State<Shared>) -> Json<StateResp> {
         segments: master.segment_count(),
         capacity: master.capacity(),
         allocated: master.allocated(),
+        dead_segments: master.dead_segments(),
     })
 }
 
@@ -173,21 +195,119 @@ fn router(shared: Shared) -> Router {
         .route("/v1/put_revoke", post(put_revoke))
         .route("/v1/get_replica_list", post(get_replica_list))
         .route("/v1/remove", post(remove))
+        .route("/v1/heartbeat", post(heartbeat))
         .route("/v1/state", get(state))
         .with_state(shared)
 }
 
-pub async fn run_store_master(
-    addr: String,
-    strategy: String,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let shared: Shared = Arc::new(Mutex::new(MasterService::new(&strategy)));
-    let socket: SocketAddr = addr.parse()?;
+/// Options for the HA-capable store master.
+pub struct StoreMasterOpts {
+    pub addr: String,
+    pub strategy: String,
+    /// Snapshot file: recovered on startup if present, saved periodically.
+    pub snapshot: Option<String>,
+    /// Seconds between periodic snapshots (0 = only on demand / never).
+    pub snapshot_interval_secs: u64,
+    /// Seconds a segment may miss heartbeats before it's dead (0 = health off).
+    pub segment_ttl: u64,
+    /// Comma-separated etcd endpoints for leader election (HA mode). Requires the
+    /// `etcd` build feature; without it a given value is ignored with a warning.
+    pub etcd: Option<String>,
+    /// This master's id (the leader value in the election).
+    pub node_id: String,
+}
+
+pub async fn run_store_master(opts: StoreMasterOpts) -> Result<(), Box<dyn std::error::Error>> {
+    // 1) HA: if etcd endpoints are configured, campaign for leadership and only
+    //    the winner serves (standbys block here until the leader's lease lapses).
+    #[cfg(feature = "etcd")]
+    let _leadership = match &opts.etcd {
+        Some(endpoints) => {
+            let eps: Vec<String> = endpoints
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            println!(
+                "store-master '{}' joining leader election on etcd {eps:?} …",
+                opts.node_id
+            );
+            let mut election = quillcache_store::MasterElection::join(
+                eps,
+                "quillcache/store-master/leader",
+                opts.node_id.clone(),
+                10,
+            )
+            .await?;
+            let leadership = election.campaign().await?; // blocks until we are leader
+            println!(
+                "store-master '{}' is now the LEADER — serving",
+                opts.node_id
+            );
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    if election.keep_alive().await.is_err() {
+                        break;
+                    }
+                }
+            });
+            Some(leadership)
+        }
+        None => None,
+    };
+    #[cfg(not(feature = "etcd"))]
+    if opts.etcd.is_some() {
+        eprintln!("--etcd given but built without `--features etcd`; running as a single master");
+    }
+
+    // 2) Recover from the snapshot if present, else start fresh.
+    let mut master = match &opts.snapshot {
+        Some(path) if std::path::Path::new(path).exists() => {
+            println!("recovering master state from snapshot {path}");
+            MasterService::load_snapshot(path)?
+        }
+        _ => MasterService::new(&opts.strategy),
+    };
+    if opts.segment_ttl > 0 {
+        master.set_segment_ttl(opts.segment_ttl);
+    }
+    let shared: Shared = Arc::new(Mutex::new(master));
+
+    // 3) Drive the logical clock on wall time so leases + segment health advance.
+    {
+        let s = shared.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                s.lock().unwrap().tick();
+            }
+        });
+    }
+
+    // 4) Periodic crash-safe snapshot of the in-memory metadata.
+    if let (Some(path), true) = (opts.snapshot.clone(), opts.snapshot_interval_secs > 0) {
+        let s = shared.clone();
+        let interval = opts.snapshot_interval_secs;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(interval));
+            loop {
+                tick.tick().await;
+                if let Err(e) = s.lock().unwrap().save_snapshot(&path) {
+                    eprintln!("snapshot save failed: {e}");
+                }
+            }
+        });
+    }
+
+    let socket: SocketAddr = opts.addr.parse()?;
     let listener = TcpListener::bind(socket).await?;
-    println!("QuillCache store MasterService on http://{socket} (strategy: {strategy})");
     println!(
-        "  POST /v1/{{mount,put_start,put_end,put_revoke,get_replica_list,remove}} · GET /v1/state"
+        "QuillCache store MasterService '{}' on http://{socket} (strategy: {}, snapshot: {:?}, segment_ttl: {}s)",
+        opts.node_id, opts.strategy, opts.snapshot, opts.segment_ttl
     );
+    println!("  POST /v1/{{mount,put_start,put_end,put_revoke,get_replica_list,remove,heartbeat}} · GET /v1/state");
     axum::serve(listener, router(shared)).await?;
     Ok(())
 }
