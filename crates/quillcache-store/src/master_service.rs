@@ -23,12 +23,15 @@ use crate::allocator::{AllocatedBuffer, BufferAllocator};
 use crate::count_min_sketch::CountMinSketch;
 use crate::offset_allocator::OffsetBufferAllocator;
 use crate::replica::{Replica, ReplicaData, ReplicaList, ReplicaStatus};
+use crate::sharded_map::ShardedMap;
 use crate::types::{ErrorCode, ObjectKey, ReplicaId, ReplicateConfig, SegmentName};
 use quillcache_core::IdentityScope;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// Per-object control-plane metadata (server-side; never sent to clients).
 #[derive(Debug)]
@@ -86,79 +89,137 @@ pub struct ObjectSnapshot {
     pub hard_pinned: bool,
 }
 
-/// The store's metadata / allocation / eviction authority.
+/// Mutable allocator/segment state behind one mutex (the "segment lock" in the
+/// lock order). Allocation, freeing, and replica-id assignment all need it.
 #[derive(Debug)]
-pub struct MasterService {
+struct SegmentState {
     /// Mounted segments → their buffer allocators (one per segment).
     allocators: Vec<Box<dyn BufferAllocator>>,
-    objects: HashMap<ObjectKey, ObjectMetadata>,
     strategy: Box<dyn AllocationStrategy>,
+    next_replica_id: ReplicaId,
+}
+
+impl SegmentState {
+    fn capacity(&self) -> u64 {
+        self.allocators.iter().map(|a| a.capacity()).sum()
+    }
+
+    fn allocated(&self) -> u64 {
+        self.allocators.iter().map(|a| a.allocated()).sum()
+    }
+
+    fn free_replicas(&mut self, replicas: &ReplicaList) {
+        for replica in replicas.values() {
+            if let ReplicaData::Memory(buffer) = &replica.data {
+                if let Some(allocator) = self
+                    .allocators
+                    .iter_mut()
+                    .find(|a| a.segment_name() == buffer.segment_name)
+                {
+                    allocator.deallocate(buffer);
+                }
+            }
+        }
+    }
+}
+
+/// The store's metadata / allocation / eviction authority. Concurrent by design
+/// (Mooncake's sharded master): object metadata lives in a per-shard-locked
+/// [`ShardedMap`], and the allocators sit behind a separate [`Mutex`].
+///
+/// **Lock order (deadlock-free):** a read or single-object write locks only its
+/// object shard; an allocator-touching op locks `segments` (outer) then a shard
+/// or all shards (inner) — never the reverse. `segment_heartbeat` and `hotness`
+/// are held only briefly and never nested with the others.
+#[derive(Debug)]
+pub struct MasterService {
+    objects: ShardedMap<ObjectMetadata>,
+    segments: Mutex<SegmentState>,
     /// The allocation-strategy name, kept so a snapshot can rebuild the same one.
     strategy_name: String,
-    next_replica_id: ReplicaId,
-    clock: u64,
+    clock: AtomicU64,
     lease_ttl: u64,
     high_watermark: f64,
     eviction_ratio: f64,
     /// Last logical-clock tick each segment's node heartbeated — Mooncake's
     /// periodic client heartbeats, the basis for failure detection.
-    segment_heartbeat: HashMap<SegmentName, u64>,
+    segment_heartbeat: Mutex<HashMap<SegmentName, u64>>,
     /// Ticks a segment may miss before it is treated as dead. `0` disables the
     /// health check (every mounted segment is considered alive).
-    segment_ttl: u64,
+    segment_ttl: AtomicU64,
     /// Approximate per-key access frequency (Mooncake's CountMinSketch), bumped on
     /// every guarded read so eviction / promotion can favour hot keys.
-    hotness: CountMinSketch,
+    hotness: Mutex<CountMinSketch>,
 }
 
 impl MasterService {
     pub fn new(strategy: &str) -> Self {
         Self {
-            allocators: Vec::new(),
-            objects: HashMap::new(),
-            strategy: create_allocation_strategy(strategy),
+            objects: ShardedMap::default(),
+            segments: Mutex::new(SegmentState {
+                allocators: Vec::new(),
+                strategy: create_allocation_strategy(strategy),
+                next_replica_id: 0,
+            }),
             strategy_name: strategy.to_string(),
-            next_replica_id: 0,
-            clock: 0,
+            clock: AtomicU64::new(0),
             lease_ttl: 5,
             high_watermark: 0.95,
             eviction_ratio: 0.1,
-            segment_heartbeat: HashMap::new(),
-            segment_ttl: 0,
-            hotness: CountMinSketch::default(),
+            segment_heartbeat: Mutex::new(HashMap::new()),
+            segment_ttl: AtomicU64::new(0),
+            hotness: Mutex::new(CountMinSketch::default()),
         }
+    }
+
+    fn segments(&self) -> std::sync::MutexGuard<'_, SegmentState> {
+        self.segments.lock().expect("segments mutex poisoned")
     }
 
     /// Advance the logical clock (drives leases + LRU without wall-clock, so
     /// tests are deterministic).
-    pub fn tick(&mut self) -> u64 {
-        self.clock += 1;
-        self.clock
+    pub fn tick(&self) -> u64 {
+        self.clock.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     // ---- segment lifecycle (Mooncake's MountSegment / UnmountSegment) ----
 
-    pub fn mount_segment(&mut self, name: impl Into<SegmentName>, capacity: u64) {
+    pub fn mount_segment(&self, name: impl Into<SegmentName>, capacity: u64) {
         let name = name.into();
-        // A freshly-mounted segment is alive as of now.
-        self.segment_heartbeat.insert(name.clone(), self.clock);
-        self.allocators
+        // A freshly-mounted segment is alive as of now (heartbeat lock released
+        // before the segments lock — never nested).
+        self.segment_heartbeat
+            .lock()
+            .expect("heartbeat mutex poisoned")
+            .insert(name.clone(), self.clock.load(Ordering::Relaxed));
+        self.segments()
+            .allocators
             .push(Box::new(OffsetBufferAllocator::new(name, capacity)));
     }
 
     /// Unmount a segment: drop any replicas living on it (they become
     /// unreadable), then remove its allocator.
-    pub fn unmount_segment(&mut self, name: &str) -> Result<(), ErrorCode> {
-        if !self.allocators.iter().any(|a| a.segment_name() == name) {
+    pub fn unmount_segment(&self, name: &str) -> Result<(), ErrorCode> {
+        let mut segs = self.segments();
+        if !segs.allocators.iter().any(|a| a.segment_name() == name) {
             return Err(ErrorCode::SegmentNotFound);
         }
-        for obj in self.objects.values_mut() {
-            obj.replicas.retain(|_, r| r.segment_name() != Some(name));
-        }
-        self.allocators.retain(|a| a.segment_name() != name);
-        self.segment_heartbeat.remove(name);
-        // Objects left with no replicas are gone.
-        self.objects.retain(|_, o| !o.replicas.is_empty());
+        // Drop replicas on this segment, then any now-empty objects (segments
+        // held → all shards, the fixed outer→inner order).
+        self.objects.with_all(|shards| {
+            for shard in shards.iter_mut() {
+                for obj in shard.values_mut() {
+                    obj.replicas.retain(|_, r| r.segment_name() != Some(name));
+                }
+                shard.retain(|_, o| !o.replicas.is_empty());
+            }
+        });
+        segs.allocators.retain(|a| a.segment_name() != name);
+        drop(segs);
+        self.segment_heartbeat
+            .lock()
+            .expect("heartbeat mutex poisoned")
+            .remove(name);
         Ok(())
     }
 
@@ -167,15 +228,20 @@ impl MasterService {
     /// Enable failure detection: a segment that misses a heartbeat for more than
     /// `ttl` logical ticks is treated as dead and its replicas are not handed
     /// out. `0` disables the check (the default — every mounted segment is alive).
-    pub fn set_segment_ttl(&mut self, ttl: u64) {
-        self.segment_ttl = ttl;
+    pub fn set_segment_ttl(&self, ttl: u64) {
+        self.segment_ttl.store(ttl, Ordering::Relaxed);
     }
 
     /// Record a liveness heartbeat from a segment's node. Unknown segment → error.
-    pub fn heartbeat(&mut self, segment: &str) -> Result<(), ErrorCode> {
-        match self.segment_heartbeat.get_mut(segment) {
+    pub fn heartbeat(&self, segment: &str) -> Result<(), ErrorCode> {
+        let now = self.clock.load(Ordering::Relaxed);
+        let mut hb = self
+            .segment_heartbeat
+            .lock()
+            .expect("heartbeat mutex poisoned");
+        match hb.get_mut(segment) {
             Some(last) => {
-                *last = self.clock;
+                *last = now;
                 Ok(())
             }
             None => Err(ErrorCode::SegmentNotFound),
@@ -185,10 +251,15 @@ impl MasterService {
     /// Whether a mounted segment is alive (heartbeated within `segment_ttl`).
     /// With the check disabled (`segment_ttl == 0`), any mounted segment is alive.
     pub fn segment_alive(&self, segment: &str) -> bool {
-        match self.segment_heartbeat.get(segment) {
-            Some(&last) => {
-                self.segment_ttl == 0 || self.clock.saturating_sub(last) <= self.segment_ttl
-            }
+        let ttl = self.segment_ttl.load(Ordering::Relaxed);
+        let now = self.clock.load(Ordering::Relaxed);
+        match self
+            .segment_heartbeat
+            .lock()
+            .expect("heartbeat mutex poisoned")
+            .get(segment)
+        {
+            Some(&last) => ttl == 0 || now.saturating_sub(last) <= ttl,
             None => false,
         }
     }
@@ -196,9 +267,16 @@ impl MasterService {
     /// Mounted segments that have missed heartbeats past the TTL — failure
     /// detection surfaces them so the control plane can re-replicate / route away.
     pub fn dead_segments(&self) -> Vec<String> {
-        self.allocators
+        // Collect names under the segments lock, then check liveness separately
+        // (heartbeat lock never nested under segments).
+        let names: Vec<String> = self
+            .segments()
+            .allocators
             .iter()
             .map(|a| a.segment_name().to_string())
+            .collect();
+        names
+            .into_iter()
             .filter(|name| !self.segment_alive(name))
             .collect()
     }
@@ -208,59 +286,71 @@ impl MasterService {
     /// Phase 1: allocate `config.replica_num` replicas for `key` and return their
     /// buffers; the object is recorded `Initialized` (not yet readable).
     pub fn put_start(
-        &mut self,
+        &self,
         key: ObjectKey,
         identity: IdentityScope,
         size: u64,
         config: &ReplicateConfig,
     ) -> Result<Vec<AllocatedBuffer>, ErrorCode> {
-        if let Some(existing) = self.objects.get(&key) {
-            if existing.has_complete_replica() {
+        let mut segs = self.segments();
+        // Dup check + reclaim any in-flight leftover (segments held → this key's
+        // shard, the fixed outer→inner order).
+        let leftover = self.objects.with_shard(&key, |s| {
+            if s.get(&key)
+                .is_some_and(ObjectMetadata::has_complete_replica)
+            {
                 return Err(ErrorCode::ObjectAlreadyExists);
             }
-        }
-        // Reclaim any in-flight leftover for this key before re-allocating.
-        if let Some(old) = self.objects.remove(&key) {
-            self.free_replicas(&old.replicas);
+            Ok(s.remove(&key))
+        })?;
+        if let Some(old) = leftover {
+            segs.free_replicas(&old.replicas);
         }
 
         let preferred = config.preferred_segment.as_deref();
-        let buffers = self.allocate_replicas(size, config.replica_num, preferred)?;
+        let buffers = self.allocate_replicas(&mut segs, size, config.replica_num, preferred)?;
 
         let mut replicas = ReplicaList::new();
         for buffer in &buffers {
-            let id = self.next_replica_id;
-            self.next_replica_id += 1;
+            let id = segs.next_replica_id;
+            segs.next_replica_id += 1;
             replicas.insert(id, Replica::new(id, ReplicaData::Memory(buffer.clone())));
         }
-        let now = self.clock;
-        self.objects.insert(
-            key,
-            ObjectMetadata {
-                replicas,
-                identity,
-                lease_until: 0,
-                last_access: now,
-                soft_pinned: config.with_soft_pin,
-                hard_pinned: config.with_hard_pin,
-            },
-        );
+        let now = self.clock.load(Ordering::Relaxed);
+        let metadata = ObjectMetadata {
+            replicas,
+            identity,
+            lease_until: 0,
+            last_access: now,
+            soft_pinned: config.with_soft_pin,
+            hard_pinned: config.with_hard_pin,
+        };
+        self.objects.with_shard(&key, |s| {
+            s.insert(key.clone(), metadata);
+        });
         Ok(buffers)
     }
 
-    /// Phase 2: flip the object's replicas to `Complete` (readable).
-    pub fn put_end(&mut self, key: &str) -> Result<(), ErrorCode> {
-        let object = self.objects.get_mut(key).ok_or(ErrorCode::ObjectNotFound)?;
-        for replica in object.replicas.values_mut() {
-            replica.status = ReplicaStatus::Complete;
-        }
-        Ok(())
+    /// Phase 2: flip the object's replicas to `Complete` (readable). Single-object
+    /// write — locks only this key's shard.
+    pub fn put_end(&self, key: &str) -> Result<(), ErrorCode> {
+        self.objects.with_shard(key, |s| {
+            let object = s.get_mut(key).ok_or(ErrorCode::ObjectNotFound)?;
+            for replica in object.replicas.values_mut() {
+                replica.status = ReplicaStatus::Complete;
+            }
+            Ok(())
+        })
     }
 
     /// Abort an in-flight Put: free the allocation and drop the object.
-    pub fn put_revoke(&mut self, key: &str) -> Result<(), ErrorCode> {
-        let object = self.objects.remove(key).ok_or(ErrorCode::ObjectNotFound)?;
-        self.free_replicas(&object.replicas);
+    pub fn put_revoke(&self, key: &str) -> Result<(), ErrorCode> {
+        let mut segs = self.segments();
+        let object = self
+            .objects
+            .with_shard(key, |s| s.remove(key))
+            .ok_or(ErrorCode::ObjectNotFound)?;
+        segs.free_replicas(&object.replicas);
         Ok(())
     }
 
@@ -269,44 +359,56 @@ impl MasterService {
     /// Return the object's complete replicas, **identity-guarded**, and grant a
     /// read lease. Refuses a requester whose identity doesn't match the writer's.
     pub fn get_replica_list(
-        &mut self,
+        &self,
         key: &str,
         requester: &IdentityScope,
     ) -> Result<Vec<Replica>, ErrorCode> {
-        let now = self.clock;
-        let lease_ttl = self.lease_ttl;
-        // Record this access in the frequency sketch (hot-key tracking).
-        self.hotness.increment(key);
+        let now = self.clock.load(Ordering::Relaxed);
+        let ttl = self.segment_ttl.load(Ordering::Relaxed);
         // Failure detection: a Memory replica on a segment whose node stopped
-        // heartbeating is treated as lost; a Disk replica is durable, so kept.
-        let alive: HashSet<String> = self
-            .allocators
-            .iter()
-            .map(|a| a.segment_name().to_string())
-            .filter(|name| self.segment_alive(name))
-            .collect();
-        let object = self.objects.get_mut(key).ok_or(ErrorCode::ObjectNotFound)?;
-        // QuillCache identity guard: a content-hash key can be requested under a
-        // different identity — refuse cross-tenant / cross-adapter / cross-model.
-        if let Some(violation) = object.identity.reuse_violation_against(requester) {
-            return Err(ErrorCode::UnsafeReuse(violation));
-        }
-        let complete: Vec<Replica> = object
-            .replicas
-            .values()
-            .filter(|r| r.is_complete())
-            .filter(|r| match r.segment_name() {
-                Some(seg) => alive.contains(seg),
-                None => true,
-            })
-            .cloned()
-            .collect();
-        if complete.is_empty() {
-            return Err(ErrorCode::ObjectNotReady);
-        }
-        object.last_access = now;
-        object.lease_until = now + lease_ttl;
-        Ok(complete)
+        // heartbeating is treated as lost; a Disk replica is durable, so kept. The
+        // alive set is read once from the heartbeat map (its keys are the mounted
+        // segments) — no segments lock, so reads stay concurrent.
+        let alive: HashSet<String> = {
+            let hb = self
+                .segment_heartbeat
+                .lock()
+                .expect("heartbeat mutex poisoned");
+            hb.iter()
+                .filter(|(_, &last)| ttl == 0 || now.saturating_sub(last) <= ttl)
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+        // Record this access in the frequency sketch (hot-key tracking).
+        self.hotness
+            .lock()
+            .expect("hotness mutex poisoned")
+            .increment(key);
+        // Only this key's shard is locked — concurrent with reads of other keys.
+        self.objects.with_shard(key, |s| {
+            let object = s.get_mut(key).ok_or(ErrorCode::ObjectNotFound)?;
+            // QuillCache identity guard: a content-hash key can be requested under
+            // a different identity — refuse cross-tenant / cross-adapter / model.
+            if let Some(violation) = object.identity.reuse_violation_against(requester) {
+                return Err(ErrorCode::UnsafeReuse(violation));
+            }
+            let complete: Vec<Replica> = object
+                .replicas
+                .values()
+                .filter(|r| r.is_complete())
+                .filter(|r| match r.segment_name() {
+                    Some(seg) => alive.contains(seg),
+                    None => true,
+                })
+                .cloned()
+                .collect();
+            if complete.is_empty() {
+                return Err(ErrorCode::ObjectNotReady);
+            }
+            object.last_access = now;
+            object.lease_until = now + self.lease_ttl;
+            Ok(complete)
+        })
     }
 
     // ---- batch APIs (Mooncake's BatchPut / BatchGet — one round-trip for many
@@ -316,7 +418,7 @@ impl MasterService {
     /// can't be allocated, the ones already started in this batch are revoked and
     /// the error is returned (no partial batch is left behind).
     pub fn batch_put_start(
-        &mut self,
+        &self,
         items: Vec<(ObjectKey, IdentityScope, u64)>,
         config: &ReplicateConfig,
     ) -> Result<Vec<Vec<AllocatedBuffer>>, ErrorCode> {
@@ -341,7 +443,7 @@ impl MasterService {
 
     /// Commit many objects' replicas (flip to readable). Errors on the first key
     /// that isn't in flight.
-    pub fn batch_put_end(&mut self, keys: &[String]) -> Result<(), ErrorCode> {
+    pub fn batch_put_end(&self, keys: &[String]) -> Result<(), ErrorCode> {
         for key in keys {
             self.put_end(key)?;
         }
@@ -350,7 +452,7 @@ impl MasterService {
 
     /// Revoke many in-flight Puts (free their allocations). Errors on the first
     /// key not in flight.
-    pub fn batch_put_revoke(&mut self, keys: &[String]) -> Result<(), ErrorCode> {
+    pub fn batch_put_revoke(&self, keys: &[String]) -> Result<(), ErrorCode> {
         for key in keys {
             self.put_revoke(key)?;
         }
@@ -367,20 +469,23 @@ impl MasterService {
     /// [`ErrorCode::ObjectNotReady`] while a read lease is active (the object is
     /// busy), mirroring Mooncake's `OBJECT_REPLICA_BUSY`.
     pub fn upsert_start(
-        &mut self,
+        &self,
         key: ObjectKey,
         identity: IdentityScope,
         size: u64,
         config: &ReplicateConfig,
     ) -> Result<Vec<AllocatedBuffer>, ErrorCode> {
-        let (exists_complete, leased, existing_size) = match self.objects.get(&key) {
-            None => (false, false, 0),
-            Some(o) => (
-                o.has_complete_replica(),
-                o.lease_until > self.clock,
-                o.replicas.values().next().map(|r| r.size()).unwrap_or(0),
-            ),
-        };
+        let now = self.clock.load(Ordering::Relaxed);
+        // Inspect current state under this key's shard only.
+        let (exists_complete, leased, existing_size) =
+            self.objects.with_shard(&key, |s| match s.get(&key) {
+                None => (false, false, 0),
+                Some(o) => (
+                    o.has_complete_replica(),
+                    o.lease_until > now,
+                    o.replicas.values().next().map(|r| r.size()).unwrap_or(0),
+                ),
+            });
         if !exists_complete {
             // Absent or only an in-flight leftover — PutStart reclaims + allocates.
             return self.put_start(key, identity, size, config);
@@ -389,34 +494,39 @@ impl MasterService {
             return Err(ErrorCode::ObjectNotReady);
         }
         if existing_size == size {
-            // In-place: reuse the existing buffers, re-open for writing.
-            let now = self.clock;
-            let object = self.objects.get_mut(&key).expect("object present");
-            object.identity = identity;
-            object.last_access = now;
-            let mut buffers = Vec::new();
-            for replica in object.replicas.values_mut() {
-                replica.status = ReplicaStatus::Initialized;
-                if let ReplicaData::Memory(buffer) = &replica.data {
-                    buffers.push(buffer.clone());
+            // In-place: reuse the existing buffers, re-open for writing (shard-only).
+            return Ok(self.objects.with_shard(&key, |s| {
+                let object = s.get_mut(&key).expect("object present");
+                object.identity = identity;
+                object.last_access = now;
+                let mut buffers = Vec::new();
+                for replica in object.replicas.values_mut() {
+                    replica.status = ReplicaStatus::Initialized;
+                    if let ReplicaData::Memory(buffer) = &replica.data {
+                        buffers.push(buffer.clone());
+                    }
                 }
-            }
-            Ok(buffers)
-        } else {
-            // Size changed: free the old replicas, then allocate fresh.
-            let old = self.objects.remove(&key).expect("object present");
-            self.free_replicas(&old.replicas);
-            self.put_start(key, identity, size, config)
+                buffers
+            }));
         }
+        // Size changed: free the old replicas (segments → shard), then allocate
+        // fresh via put_start — the segments lock is released first, no reentrancy.
+        {
+            let mut segs = self.segments();
+            if let Some(old) = self.objects.with_shard(&key, |s| s.remove(&key)) {
+                segs.free_replicas(&old.replicas);
+            }
+        }
+        self.put_start(key, identity, size, config)
     }
 
     /// Mooncake's `UpsertEnd` — same as committing a Put.
-    pub fn upsert_end(&mut self, key: &str) -> Result<(), ErrorCode> {
+    pub fn upsert_end(&self, key: &str) -> Result<(), ErrorCode> {
         self.put_end(key)
     }
 
     /// Mooncake's `UpsertRevoke` — same as aborting a Put.
-    pub fn upsert_revoke(&mut self, key: &str) -> Result<(), ErrorCode> {
+    pub fn upsert_revoke(&self, key: &str) -> Result<(), ErrorCode> {
         self.put_revoke(key)
     }
 
@@ -424,7 +534,7 @@ impl MasterService {
     /// missing / not ready / refused (the connector wants all of a prefix's
     /// layers, or it recomputes the prefix).
     pub fn batch_get_replica_list(
-        &mut self,
+        &self,
         keys: &[String],
         requester: &IdentityScope,
     ) -> Result<Vec<Vec<Replica>>, ErrorCode> {
@@ -436,9 +546,9 @@ impl MasterService {
     }
 
     pub fn exist_key(&self, key: &str) -> bool {
-        self.objects
-            .get(key)
-            .is_some_and(ObjectMetadata::has_complete_replica)
+        self.objects.with_shard(key, |s| {
+            s.get(key).is_some_and(ObjectMetadata::has_complete_replica)
+        })
     }
 
     /// Existence for many keys in one call (Mooncake's `BatchExistKey`).
@@ -451,19 +561,21 @@ impl MasterService {
     /// its complete replicas. Cross-identity matches are skipped (the guard), not
     /// errored — a bulk query returns what the caller may see.
     pub fn get_replica_list_by_regex(
-        &mut self,
+        &self,
         pattern: &str,
         requester: &IdentityScope,
     ) -> Result<HashMap<String, Vec<Replica>>, ErrorCode> {
         let re = Regex::new(pattern).map_err(|e| ErrorCode::Io(format!("bad regex: {e}")))?;
-        // Collect matching keys first so the &mut get_replica_list calls don't
-        // alias the iteration over `objects`.
-        let keys: Vec<String> = self
-            .objects
-            .keys()
-            .filter(|k| re.is_match(k))
-            .cloned()
-            .collect();
+        // Collect matching keys first (all shards, briefly) so the per-key
+        // get_replica_list calls each take just their own shard afterwards.
+        let keys: Vec<String> = self.objects.with_all(|shards| {
+            shards
+                .iter()
+                .flat_map(|s| s.keys())
+                .filter(|k| re.is_match(k))
+                .cloned()
+                .collect()
+        });
         let mut out = HashMap::new();
         for key in keys {
             if let Ok(replicas) = self.get_replica_list(&key, requester) {
@@ -475,64 +587,52 @@ impl MasterService {
 
     /// Remove an object and free its replicas. Blocked while a read lease is
     /// active unless `force`.
-    pub fn remove(&mut self, key: &str, force: bool) -> Result<(), ErrorCode> {
-        let leased = {
-            let object = self.objects.get(key).ok_or(ErrorCode::ObjectNotFound)?;
-            object.lease_until > self.clock
-        };
-        if leased && !force {
-            return Err(ErrorCode::ObjectNotReady);
-        }
-        let object = self.objects.remove(key).unwrap();
-        self.free_replicas(&object.replicas);
+    pub fn remove(&self, key: &str, force: bool) -> Result<(), ErrorCode> {
+        let now = self.clock.load(Ordering::Relaxed);
+        let mut segs = self.segments();
+        let object = self.objects.with_shard(key, |s| match s.get(key) {
+            None => Err(ErrorCode::ObjectNotFound),
+            Some(o) if o.lease_until > now && !force => Err(ErrorCode::ObjectNotReady),
+            Some(_) => Ok(s.remove(key).expect("present")),
+        })?;
+        segs.free_replicas(&object.replicas);
         Ok(())
     }
 
     // ---- observability ----
 
     pub fn segment_count(&self) -> usize {
-        self.allocators.len()
+        self.segments().allocators.len()
     }
     pub fn object_count(&self) -> usize {
         self.objects.len()
     }
     pub fn capacity(&self) -> u64 {
-        self.allocators.iter().map(|a| a.capacity()).sum()
+        self.segments().capacity()
     }
     pub fn allocated(&self) -> u64 {
-        self.allocators.iter().map(|a| a.allocated()).sum()
+        self.segments().allocated()
     }
 
     /// Approximate access frequency for `key` (Mooncake's CountMinSketch
     /// estimate) — how hot the key is, for frequency-aware eviction / promotion.
     pub fn hotness(&self, key: &str) -> u8 {
-        self.hotness.count(key)
+        self.hotness
+            .lock()
+            .expect("hotness mutex poisoned")
+            .count(key)
     }
 
     // ---- HA: snapshot + recovery (Mooncake's metadata snapshot thread) ----
 
     /// Take a consistent [`MasterSnapshot`] of the current in-memory metadata.
     pub fn snapshot(&self) -> MasterSnapshot {
-        MasterSnapshot {
-            version: 1,
-            strategy: self.strategy_name.clone(),
-            clock: self.clock,
-            lease_ttl: self.lease_ttl,
-            high_watermark: self.high_watermark,
-            eviction_ratio: self.eviction_ratio,
-            segment_ttl: self.segment_ttl,
-            next_replica_id: self.next_replica_id,
-            segments: self
-                .allocators
+        // segments (outer) → all shards (inner) — the fixed order.
+        let segs = self.segments();
+        let objects = self.objects.with_all(|shards| {
+            shards
                 .iter()
-                .map(|a| SegmentSnapshot {
-                    name: a.segment_name().to_string(),
-                    capacity: a.capacity(),
-                })
-                .collect(),
-            objects: self
-                .objects
-                .iter()
+                .flat_map(|s| s.iter())
                 .map(|(key, o)| ObjectSnapshot {
                     key: key.clone(),
                     replicas: o.replicas.values().cloned().collect(),
@@ -542,7 +642,26 @@ impl MasterService {
                     soft_pinned: o.soft_pinned,
                     hard_pinned: o.hard_pinned,
                 })
+                .collect()
+        });
+        MasterSnapshot {
+            version: 1,
+            strategy: self.strategy_name.clone(),
+            clock: self.clock.load(Ordering::Relaxed),
+            lease_ttl: self.lease_ttl,
+            high_watermark: self.high_watermark,
+            eviction_ratio: self.eviction_ratio,
+            segment_ttl: self.segment_ttl.load(Ordering::Relaxed),
+            next_replica_id: segs.next_replica_id,
+            segments: segs
+                .allocators
+                .iter()
+                .map(|a| SegmentSnapshot {
+                    name: a.segment_name().to_string(),
+                    capacity: a.capacity(),
+                })
                 .collect(),
+            objects,
         }
     }
 
@@ -550,27 +669,36 @@ impl MasterService {
     /// replica's exact `(offset, size)` so the allocator layout matches, then
     /// restore objects, leases, pins, and the clock.
     pub fn recover(snapshot: MasterSnapshot) -> Result<Self, ErrorCode> {
-        let mut master = MasterService::new(&snapshot.strategy);
-        master.clock = snapshot.clock;
+        let master = MasterService::new(&snapshot.strategy);
+        master.clock.store(snapshot.clock, Ordering::Relaxed);
+        master
+            .segment_ttl
+            .store(snapshot.segment_ttl, Ordering::Relaxed);
+        // lease_ttl / watermarks are immutable after construction; set them on the
+        // freshly-owned value before it is shared.
+        let mut master = master;
         master.lease_ttl = snapshot.lease_ttl;
         master.high_watermark = snapshot.high_watermark;
         master.eviction_ratio = snapshot.eviction_ratio;
-        master.segment_ttl = snapshot.segment_ttl;
+        let master = master;
         for seg in &snapshot.segments {
             master.mount_segment(seg.name.clone(), seg.capacity);
         }
         for obj in snapshot.objects {
             // Re-reserve each Memory replica's exact range so the allocator's
             // free-list reflects the recovered layout (Disk replicas are durable).
-            for replica in &obj.replicas {
-                if let ReplicaData::Memory(buf) = &replica.data {
-                    let allocator = master
-                        .allocators
-                        .iter_mut()
-                        .find(|a| a.segment_name() == buf.segment_name())
-                        .ok_or(ErrorCode::SegmentNotFound)?;
-                    if !allocator.reserve(buf.offset, buf.size) {
-                        return Err(ErrorCode::InvalidReplica);
+            {
+                let mut segs = master.segments();
+                for replica in &obj.replicas {
+                    if let ReplicaData::Memory(buf) = &replica.data {
+                        let allocator = segs
+                            .allocators
+                            .iter_mut()
+                            .find(|a| a.segment_name() == buf.segment_name())
+                            .ok_or(ErrorCode::SegmentNotFound)?;
+                        if !allocator.reserve(buf.offset, buf.size) {
+                            return Err(ErrorCode::InvalidReplica);
+                        }
                     }
                 }
             }
@@ -578,19 +706,21 @@ impl MasterService {
             for replica in obj.replicas {
                 replicas.insert(replica.id, replica);
             }
-            master.objects.insert(
-                obj.key,
-                ObjectMetadata {
-                    replicas,
-                    identity: obj.identity,
-                    lease_until: obj.lease_until,
-                    last_access: obj.last_access,
-                    soft_pinned: obj.soft_pinned,
-                    hard_pinned: obj.hard_pinned,
-                },
-            );
+            master.objects.with_shard(&obj.key, |s| {
+                s.insert(
+                    obj.key.clone(),
+                    ObjectMetadata {
+                        replicas,
+                        identity: obj.identity,
+                        lease_until: obj.lease_until,
+                        last_access: obj.last_access,
+                        soft_pinned: obj.soft_pinned,
+                        hard_pinned: obj.hard_pinned,
+                    },
+                );
+            });
         }
-        master.next_replica_id = snapshot.next_replica_id;
+        master.segments().next_replica_id = snapshot.next_replica_id;
         Ok(master)
     }
 
@@ -622,69 +752,64 @@ impl MasterService {
     /// coldest unpinned objects to make room and retry once (Mooncake evicts at a
     /// high watermark or on put failure).
     fn allocate_replicas(
-        &mut self,
+        &self,
+        segs: &mut SegmentState,
         size: u64,
         replica_num: usize,
         preferred: Option<&str>,
     ) -> Result<Vec<AllocatedBuffer>, ErrorCode> {
-        self.evict_if_needed();
-        match self
+        self.evict_if_needed_locked(segs);
+        match segs
             .strategy
-            .allocate(&mut self.allocators, size, replica_num, preferred, &[])
+            .allocate(&mut segs.allocators, size, replica_num, preferred, &[])
         {
             Ok(buffers) => Ok(buffers),
             Err(ErrorCode::NoAvailableSegment) => {
-                self.evict_to_fit(size.saturating_mul(replica_num as u64));
-                self.strategy
-                    .allocate(&mut self.allocators, size, replica_num, preferred, &[])
+                self.evict_to_fit(segs, size.saturating_mul(replica_num as u64));
+                segs.strategy
+                    .allocate(&mut segs.allocators, size, replica_num, preferred, &[])
             }
             Err(other) => Err(other),
         }
     }
 
-    fn free_replicas(&mut self, replicas: &ReplicaList) {
-        for replica in replicas.values() {
-            if let ReplicaData::Memory(buffer) = &replica.data {
-                if let Some(allocator) = self
-                    .allocators
-                    .iter_mut()
-                    .find(|a| a.segment_name() == buffer.segment_name)
-                {
-                    allocator.deallocate(buffer);
-                }
-            }
-        }
-    }
-
     /// Eviction candidates, coldest first; non-soft-pinned before soft-pinned;
-    /// hard-pinned and currently-leased objects are never candidates.
+    /// hard-pinned and currently-leased objects are never candidates. Locks all
+    /// shards; the caller already holds `segments` (the segments → shards order).
     fn victims_coldest_first(&self) -> Vec<ObjectKey> {
-        let now = self.clock;
-        let mut victims: Vec<(ObjectKey, u64, bool)> = self
-            .objects
-            .iter()
-            .filter(|(_, o)| !o.hard_pinned && o.lease_until <= now)
-            .map(|(k, o)| (k.clone(), o.last_access, o.soft_pinned))
-            .collect();
-        victims.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)));
-        victims.into_iter().map(|(k, _, _)| k).collect()
+        let now = self.clock.load(Ordering::Relaxed);
+        self.objects.with_all(|shards| {
+            let mut victims: Vec<(ObjectKey, u64, bool)> = shards
+                .iter()
+                .flat_map(|s| s.iter())
+                .filter(|(_, o)| !o.hard_pinned && o.lease_until <= now)
+                .map(|(k, o)| (k.clone(), o.last_access, o.soft_pinned))
+                .collect();
+            victims.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)));
+            victims.into_iter().map(|(k, _, _)| k).collect()
+        })
     }
 
     /// Proactive watermark eviction: when usage exceeds the high watermark, evict
     /// the coldest unpinned objects down below the target.
-    pub fn evict_if_needed(&mut self) -> usize {
-        let capacity = self.capacity();
-        if capacity == 0 || (self.allocated() as f64) < self.high_watermark * capacity as f64 {
+    pub fn evict_if_needed(&self) -> usize {
+        let mut segs = self.segments();
+        self.evict_if_needed_locked(&mut segs)
+    }
+
+    fn evict_if_needed_locked(&self, segs: &mut SegmentState) -> usize {
+        let capacity = segs.capacity();
+        if capacity == 0 || (segs.allocated() as f64) < self.high_watermark * capacity as f64 {
             return 0;
         }
         let target = (self.high_watermark * (1.0 - self.eviction_ratio) * capacity as f64) as u64;
         let mut evicted = 0;
         for key in self.victims_coldest_first() {
-            if self.allocated() <= target {
+            if segs.allocated() <= target {
                 break;
             }
-            if let Some(object) = self.objects.remove(&key) {
-                self.free_replicas(&object.replicas);
+            if let Some(object) = self.objects.with_shard(&key, |s| s.remove(&key)) {
+                segs.free_replicas(&object.replicas);
                 evicted += 1;
             }
         }
@@ -692,15 +817,15 @@ impl MasterService {
     }
 
     /// On-demand eviction: evict coldest unpinned objects until at least `needed`
-    /// bytes are free cluster-wide (best effort).
-    fn evict_to_fit(&mut self, needed: u64) -> usize {
+    /// bytes are free cluster-wide (best effort). The caller holds `segs`.
+    fn evict_to_fit(&self, segs: &mut SegmentState, needed: u64) -> usize {
         let mut evicted = 0;
         for key in self.victims_coldest_first() {
-            if self.capacity().saturating_sub(self.allocated()) >= needed {
+            if segs.capacity().saturating_sub(segs.allocated()) >= needed {
                 break;
             }
-            if let Some(object) = self.objects.remove(&key) {
-                self.free_replicas(&object.replicas);
+            if let Some(object) = self.objects.with_shard(&key, |s| s.remove(&key)) {
+                segs.free_replicas(&object.replicas);
                 evicted += 1;
             }
         }
@@ -724,7 +849,7 @@ mod tests {
 
     #[test]
     fn two_phase_put_then_get_with_replication() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 100);
         m.mount_segment("seg-1", 100);
         let id = scope("ten-a");
@@ -748,7 +873,7 @@ mod tests {
 
     #[test]
     fn get_is_identity_guarded() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 100);
         // Same content-hash key, written by tenant-a.
         m.put_start(
@@ -770,7 +895,7 @@ mod tests {
 
     #[test]
     fn put_revoke_frees_the_allocation() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 100);
         m.put_start(
             "k".into(),
@@ -787,7 +912,7 @@ mod tests {
 
     #[test]
     fn eviction_makes_room_under_pressure_and_keeps_hot_and_pinned() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 100);
         let id = scope("ten-a");
 
@@ -812,7 +937,7 @@ mod tests {
 
     #[test]
     fn hard_pinned_object_is_never_evicted() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 100);
         let id = scope("ten-a");
         // A is hard-pinned even though it is the coldest.
@@ -838,7 +963,7 @@ mod tests {
 
     #[test]
     fn watermark_eviction_frees_down_to_target() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 100);
         let id = scope("ten-a");
         for i in 0..10 {
@@ -858,7 +983,7 @@ mod tests {
 
     #[test]
     fn read_lease_blocks_remove_until_it_expires() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 100);
         let id = scope("ten-a");
         m.put_start("A".into(), id.clone(), 10, &ReplicateConfig::replicas(1))
@@ -878,7 +1003,7 @@ mod tests {
 
     #[test]
     fn snapshot_recovers_objects_segments_and_allocator_state() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 1000);
         m.mount_segment("seg-1", 1000);
         let id = scope("ten-a");
@@ -891,7 +1016,7 @@ mod tests {
         let allocated_before = m.allocated();
 
         // Round-trip through a snapshot (e.g. a restart / leader failover).
-        let mut r = MasterService::recover(m.snapshot()).expect("recover");
+        let r = MasterService::recover(m.snapshot()).expect("recover");
         assert_eq!(r.object_count(), 2);
         assert_eq!(r.segment_count(), 2);
         assert_eq!(
@@ -917,7 +1042,7 @@ mod tests {
 
     #[test]
     fn snapshot_file_round_trip_is_atomic() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 1000);
         let id = scope("ten-a");
         m.put_start("k".into(), id.clone(), 64, &ReplicateConfig::replicas(1))
@@ -926,14 +1051,14 @@ mod tests {
 
         let path = std::env::temp_dir().join(format!("qc-master-snap-{}.json", std::process::id()));
         m.save_snapshot(&path).unwrap();
-        let mut r = MasterService::load_snapshot(&path).unwrap();
+        let r = MasterService::load_snapshot(&path).unwrap();
         assert_eq!(r.get_replica_list("k", &id).unwrap().len(), 1);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn heartbeat_health_hides_replicas_on_a_dead_segment() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.set_segment_ttl(5); // enable failure detection
         m.mount_segment("seg-0", 1000);
         let id = scope("ten-a");
@@ -960,7 +1085,7 @@ mod tests {
 
     #[test]
     fn batch_put_then_batch_get_round_trips() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 4096);
         let id = scope("ten-a");
         let keys: Vec<String> = vec!["k0".into(), "k1".into(), "k2".into()];
@@ -985,7 +1110,7 @@ mod tests {
 
     #[test]
     fn batch_put_start_rolls_back_on_failure() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 100);
         let id = scope("ten-a");
         // The second object (200B) can't fit a 100B segment → the batch fails and
@@ -1003,7 +1128,7 @@ mod tests {
 
     #[test]
     fn upsert_reuses_buffers_in_place_when_size_unchanged() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 1000);
         let id = scope("ten-a");
         let bufs = m
@@ -1029,7 +1154,7 @@ mod tests {
 
     #[test]
     fn upsert_reallocates_when_size_changes() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 1000);
         let id = scope("ten-a");
         m.put_start("k".into(), id.clone(), 40, &ReplicateConfig::replicas(1))
@@ -1044,7 +1169,7 @@ mod tests {
 
     #[test]
     fn upsert_is_refused_while_leased() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 1000);
         let id = scope("ten-a");
         m.put_start("k".into(), id.clone(), 64, &ReplicateConfig::replicas(1))
@@ -1059,7 +1184,7 @@ mod tests {
 
     #[test]
     fn get_replica_list_by_regex_matches_allowed_keys_only() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 1000);
         let a = scope("ten-a");
         let b = scope("ten-b");
@@ -1081,7 +1206,7 @@ mod tests {
 
     #[test]
     fn batch_exist_key_reports_committed_only() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 1000);
         let id = scope("ten-a");
         let items = vec![
@@ -1103,7 +1228,7 @@ mod tests {
 
     #[test]
     fn batch_put_revoke_frees_inflight() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 1000);
         let id = scope("ten-a");
         let items = vec![
@@ -1119,7 +1244,7 @@ mod tests {
 
     #[test]
     fn guarded_reads_bump_key_hotness() {
-        let mut m = MasterService::new("random");
+        let m = MasterService::new("random");
         m.mount_segment("seg-0", 1000);
         let id = scope("ten-a");
         m.put_start("hot".into(), id.clone(), 16, &ReplicateConfig::replicas(1))
@@ -1131,5 +1256,52 @@ mod tests {
         }
         assert_eq!(m.hotness("hot"), 5, "each guarded read bumps the sketch");
         assert_eq!(m.hotness("cold"), 0);
+    }
+
+    #[test]
+    fn concurrent_puts_and_gets_across_keys_do_not_deadlock() {
+        use std::sync::Arc;
+        use std::thread;
+        // The whole point of the sharded master: many threads Put/Get distinct
+        // keys concurrently (allocation serializes on `segments`, object shards run
+        // in parallel). A lock-order slip would hang this (CI times out).
+        let m = Arc::new(MasterService::new("random"));
+        m.mount_segment("seg-0", 1 << 20);
+        let id = scope("ten-a");
+
+        let writers: Vec<_> = (0..4u64)
+            .map(|t| {
+                let m = Arc::clone(&m);
+                let id = id.clone();
+                thread::spawn(move || {
+                    for i in 0..50u64 {
+                        let k = format!("t{t}-k{i}");
+                        m.put_start(k.clone(), id.clone(), 64, &ReplicateConfig::replicas(1))
+                            .unwrap();
+                        m.put_end(&k).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        assert_eq!(m.object_count(), 4 * 50);
+
+        let readers: Vec<_> = (0..4u64)
+            .map(|t| {
+                let m = Arc::clone(&m);
+                let id = id.clone();
+                thread::spawn(move || {
+                    for i in 0..50u64 {
+                        let k = format!("t{t}-k{i}");
+                        assert_eq!(m.get_replica_list(&k, &id).unwrap().len(), 1);
+                    }
+                })
+            })
+            .collect();
+        for r in readers {
+            r.join().unwrap();
+        }
     }
 }

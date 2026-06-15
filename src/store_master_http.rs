@@ -347,7 +347,7 @@ pub async fn run_store_master(opts: StoreMasterOpts) -> Result<(), Box<dyn std::
     }
 
     // 2) Recover from the snapshot if present, else start fresh.
-    let mut master = match &opts.snapshot {
+    let master = match &opts.snapshot {
         Some(path) if std::path::Path::new(path).exists() => {
             println!("recovering master state from snapshot {path}");
             MasterService::load_snapshot(path)?
