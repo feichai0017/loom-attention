@@ -9,10 +9,10 @@ read end-to-end and measure.
 
 | Mooncake / Dynamo | QuillCache | Status |
 | --- | --- | --- |
-| Transfer Engine (`TransferEngine` + `Transport` + `MultiTransport.selectTransport`) | `quillcache-transfer-engine` (`engine` + `transport::{tcp,rdma,nvlink}` + `MultiTransport::select_best`) | ✅ TCP · ✅ **one-sided RDMA Transport** (`ibverbs`, **pooled QPs**, end-to-end verified over SoftRoCE — 10× from QP reuse) · ✅ topology-aware backend select (RDMA over TCP) / ⊙ real-NIC perf |
+| Transfer Engine (`TransferEngine` + `Transport` + `MultiTransport.selectTransport`) | `quillcache-transfer-engine` (`engine` + `transport::{tcp,rdma,nvlink}` + `MultiTransport::select_best`) | ✅ TCP · ✅ **one-sided RDMA Transport** (`ibverbs`, **pooled QPs**, end-to-end verified over SoftRoCE — 10× from QP reuse) · ✅ link-class backend select (RDMA over TCP — our own ranking; Mooncake's `selectTransport` matches the target's declared protocol) / ⊙ real-NIC perf |
 | Store `Client` (`PutStart`/`PutEnd`/`Get`) | `DummyClient` / `RealClient` | ✅ end-to-end over the transfer engine |
-| Store `MasterService` (two-phase Put, eviction, **HA**, batch) | `MasterService` | ✅ replica alloc · lease eviction · **HA** (snapshot + heartbeat + etcd election) · **batch Put/Get** |
-| `BufferAllocator` + `AllocationStrategy` | `OffsetBufferAllocator` + **`BinnedBufferAllocator` (O(1) size-binned)** + `Random`/`FreeRatioFirst` | ✅ |
+| Store `MasterService` (two-phase Put, Upsert, eviction, **HA**, batch) | `MasterService` | ✅ replica alloc · lease eviction · **Upsert** · **hot-key (CountMinSketch)** · **HA** (snapshot + heartbeat + etcd election) · **batch Put/Get + regex** |
+| `BufferAllocator` (CacheLib slab + `offset_allocator`) + `AllocationStrategy` | **`OffsetBufferAllocator`** (faithful 256-bin Aaltonen port — default) + `FirstFitBufferAllocator` + `Random`/`FreeRatioFirst` | ✅ |
 | Overload-oriented early rejection | `ControlPlane::admit` (SLO-violation budget) | ✅ |
 | `TransferMetadata` (etcd/redis/http/p2p) | `MetadataBackend`: `InMemoryMetadata` / `EtcdMetadata` (feature `etcd`) | ✅ in-memory · ✅ etcd (verified vs real etcd) · ⊙ redis/http/p2p |
 | Dynamo KV-router cost function | `DynamoCostRouter` | ✅ reproduces the worked example |
@@ -21,7 +21,7 @@ read end-to-end and measure.
 | Mooncake Conductor / Dynamo KV-Cache Indexer | `conductor` (`PrefixCacheTable` + `ModelContext`) + residency index (Holt ART) + **`replication` (hot-prefix balancing)** | ✅ longest-prefix overlap · persistent · **hot-prefix replication** |
 | vLLM/SGLang engine integration + disaggregated P/D | `QuillCacheV1Connector` (`KVConnectorBase_V1`) + `pd-proxy` router | ✅ **true vLLM-native P/D** (kv_producer/consumer, 2×L4-verified) |
 | Metrics / observability | gateway `/metrics` (Prometheus) | ✅ cache hits · transfers · refused reuse · SLO goodput |
-| — *(neither does this)* | **identity guard + crash-consistent `DiskTier`** | 🎯 differentiation |
+| Mooncake: tenant scope + crash-consistent metadata OpLog | **full-identity guard (adds model/tokenizer/adapter) + block-level CRC-on-recovery in the byte tier** | 🎯 differentiation |
 
 > `quillcache-cuda` is the one piece that is **not** a 1:1 Mooncake component:
 > Mooncake puts GPU in the Transfer Engine (the `rdma` / `nvlink` transports

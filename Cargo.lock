@@ -1397,6 +1397,7 @@ dependencies = [
  "etcd-client",
  "quillcache-core",
  "quillcache-transfer-engine",
+ "regex",
  "serde",
  "serde_json",
  "thiserror",

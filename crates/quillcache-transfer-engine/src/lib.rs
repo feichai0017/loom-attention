@@ -29,6 +29,7 @@
 
 #[cfg(feature = "cuda")]
 pub mod device_segment;
+pub mod endpoint_store;
 pub mod engine;
 pub mod metadata;
 #[cfg(feature = "etcd")]
@@ -39,6 +40,7 @@ pub mod transport;
 
 #[cfg(feature = "cuda")]
 pub use device_segment::{serve_device_segment, DeviceSegment};
+pub use endpoint_store::{EndpointStore, EvictionPolicy};
 pub use engine::TransferEngine;
 pub use metadata::{BufferDesc, InMemoryMetadata, MetadataBackend, SegmentDesc};
 #[cfg(feature = "etcd")]

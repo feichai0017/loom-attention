@@ -139,13 +139,13 @@ pub fn create_allocation_strategy(name: &str) -> Box<dyn AllocationStrategy> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::allocator::OffsetBufferAllocator;
+    use crate::allocator::FirstFitBufferAllocator;
 
     fn fleet() -> Vec<Box<dyn BufferAllocator>> {
         vec![
-            Box::new(OffsetBufferAllocator::new("seg-0", 100)),
-            Box::new(OffsetBufferAllocator::new("seg-1", 100)),
-            Box::new(OffsetBufferAllocator::new("seg-2", 100)),
+            Box::new(FirstFitBufferAllocator::new("seg-0", 100)),
+            Box::new(FirstFitBufferAllocator::new("seg-1", 100)),
+            Box::new(FirstFitBufferAllocator::new("seg-2", 100)),
         ]
     }
 

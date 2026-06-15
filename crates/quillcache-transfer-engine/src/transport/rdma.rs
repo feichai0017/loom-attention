@@ -21,14 +21,17 @@ use bytes::Bytes;
 /// [`serve_rdma_segment`] over a TCP side-channel and do one-sided RDMA READ /
 /// WRITE by `(addr + offset, rkey)`. Real under `--features rdma`; an
 /// `Unsupported` stub otherwise, so the default build needs no NIC.
-/// Per-endpoint pool of reusable RDMA connections (one RC QP each; ops serialized
-/// by the inner mutex). Reusing the QP turns a transfer into register + post +
-/// poll instead of a full handshake every call.
+/// Bounded per-endpoint pool of reusable RDMA connections (one RC QP each; ops
+/// serialized by the inner mutex). Reusing the QP turns a transfer into register
+/// + post + poll instead of a full handshake every call; the bounded
+/// [`EndpointStore`](crate::endpoint_store) caps the live QP count and reclaims
+/// evicted QPs once no transfer still holds them (Mooncake's `EndpointStore`).
+#[cfg(feature = "rdma")]
+const MAX_POOLED_QPS: usize = 256;
+
 #[cfg(feature = "rdma")]
 type RdmaPool = std::sync::Arc<
-    std::sync::Mutex<
-        std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<verbs::RdmaConnection>>>,
-    >,
+    std::sync::Mutex<crate::endpoint_store::EndpointStore<std::sync::Mutex<verbs::RdmaConnection>>>,
 >;
 
 #[derive(Clone)]
@@ -56,15 +59,14 @@ fn pool_connect(
     device: &str,
     gid_index: u8,
 ) -> Result<std::sync::Arc<std::sync::Mutex<verbs::RdmaConnection>>, String> {
-    let mut map = pool.lock().map_err(|_| "rdma pool poisoned".to_string())?;
-    if let Some(conn) = map.get(endpoint) {
-        return Ok(conn.clone());
-    }
-    let conn = std::sync::Arc::new(std::sync::Mutex::new(verbs::RdmaConnection::connect(
-        endpoint, device, gid_index,
-    )?));
-    map.insert(endpoint.to_string(), conn.clone());
-    Ok(conn)
+    let mut store = pool.lock().map_err(|_| "rdma pool poisoned".to_string())?;
+    // Reuse the pooled QP, or open one on a miss; the bounded store evicts +
+    // reclaims (FIFO) so the live QP count stays capped.
+    store.get_or_insert(endpoint, || {
+        Ok::<_, String>(std::sync::Mutex::new(verbs::RdmaConnection::connect(
+            endpoint, device, gid_index,
+        )?))
+    })
 }
 
 impl Default for RdmaTransport {
@@ -74,7 +76,12 @@ impl Default for RdmaTransport {
             device: "rxe0".into(),
             gid_index: 1,
             #[cfg(feature = "rdma")]
-            pool: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            pool: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::endpoint_store::EndpointStore::new(
+                    MAX_POOLED_QPS,
+                    crate::endpoint_store::EvictionPolicy::Fifo,
+                ),
+            )),
         }
     }
 }

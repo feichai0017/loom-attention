@@ -15,8 +15,8 @@
 //!   buffer) or `Disk` (a durable file-backed replica).
 //! - Byte movement is the `quillcache-transfer-engine` crate (segment/offset).
 //!
-//! What QuillCache adds over Mooncake (whose keys are identity-agnostic and whose
-//! pool is volatile DRAM):
+//! What QuillCache adds over Mooncake (which isolates by `tenant_id` only, and
+//! whose local byte tier recovers by trusting on-disk files by size):
 //! - the **identity guard** — a replica is served only when the requester's
 //!   model · tokenizer · adapter · tenant matches the writer's (woven into
 //!   [`MasterService::get_replica_list`] and [`DiskTier`]);
@@ -45,10 +45,12 @@ use std::path::PathBuf;
 pub mod allocation_strategy;
 pub mod allocator;
 pub mod client;
+pub mod count_min_sketch;
 pub mod disk_tier;
 #[cfg(feature = "etcd")]
 pub mod master_election;
 pub mod master_service;
+pub mod offset_allocator;
 pub mod replica;
 pub mod types;
 
@@ -56,12 +58,14 @@ pub use allocation_strategy::{
     create_allocation_strategy, AllocationStrategy, FreeRatioFirstAllocationStrategy,
     RandomAllocationStrategy,
 };
-pub use allocator::{AllocatedBuffer, BufferAllocator, OffsetBufferAllocator};
+pub use allocator::{AllocatedBuffer, BufferAllocator, FirstFitBufferAllocator};
 pub use client::{DummyClient, RealClient};
+pub use count_min_sketch::CountMinSketch;
 pub use disk_tier::DiskTier;
 #[cfg(feature = "etcd")]
 pub use master_election::{Leadership, MasterElection};
 pub use master_service::{MasterService, MasterSnapshot, ObjectSnapshot, SegmentSnapshot};
+pub use offset_allocator::{Allocation, OffsetAllocator, OffsetBufferAllocator};
 pub use replica::{Replica, ReplicaData, ReplicaList, ReplicaStatus};
 pub use types::{ErrorCode, ObjectKey, ReplicaId, ReplicateConfig, SegmentName, Slice};
 

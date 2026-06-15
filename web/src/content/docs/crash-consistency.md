@@ -4,8 +4,9 @@ description: A durable DiskTier survives a restart with object-first atomic publ
 ---
 
 The durable `DiskTier` holds real KV bytes (`Disk` replicas) that should survive a
-restart, so it needs a durable, **crash-consistent** catalog. Mooncake's pool is
-volatile DRAM (rebuilt on restart); QuillCache occupies the seam it leaves open —
+restart, so it needs a durable, **crash-consistent** catalog. Mooncake's local
+byte tier recovers by trusting on-disk files by size (no per-block validation);
+QuillCache occupies the seam it leaves open —
 a durable, immediately-reusable persistent tier — backed by `LocalKvStore`'s SSD
 tier, using the same pattern as the author's NoKV distributed file system:
 **object-first atomic publish + a WAL**.

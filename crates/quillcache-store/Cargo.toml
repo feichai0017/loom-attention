@@ -11,6 +11,7 @@ quillcache-core = { version = "1.0.0-alpha.1", path = "../quillcache-core" }
 quillcache-transfer-engine = { version = "1.0.0-alpha.1", path = "../quillcache-transfer-engine" }
 bytes = "1"
 crc32fast = "1"
+regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
