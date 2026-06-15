@@ -148,6 +148,10 @@ pub struct MasterService {
     /// Ticks a segment may miss before it is treated as dead. `0` disables the
     /// health check (every mounted segment is considered alive).
     segment_ttl: AtomicU64,
+    /// Which client owns each mounted segment (Mooncake's `client_id`). A client's
+    /// heartbeat refreshes all its segments; if the client is lost (stops pinging)
+    /// its segments go stale via `segment_heartbeat` and stop being served.
+    segment_owner: Mutex<HashMap<SegmentName, String>>,
     /// Approximate per-key access frequency (Mooncake's CountMinSketch), bumped on
     /// every guarded read so eviction / promotion can favour hot keys.
     hotness: Mutex<CountMinSketch>,
@@ -173,6 +177,7 @@ impl MasterService {
             eviction_ratio: 0.1,
             segment_heartbeat: Mutex::new(HashMap::new()),
             segment_ttl: AtomicU64::new(0),
+            segment_owner: Mutex::new(HashMap::new()),
             hotness: Mutex::new(CountMinSketch::default()),
             oplog: None,
         }
@@ -243,10 +248,100 @@ impl MasterService {
             .lock()
             .expect("heartbeat mutex poisoned")
             .remove(name);
+        self.segment_owner
+            .lock()
+            .expect("segment_owner mutex poisoned")
+            .remove(name);
         self.log_op(OpLogEntry::SegmentUnmounted {
             name: name.to_string(),
         });
         Ok(())
+    }
+
+    // ---- client-id mount lifecycle (Mooncake's client-owned segments) ----
+
+    /// Mount `name` owned by `client_id` (Mooncake's `MountSegment` with a client).
+    /// The owning client must keep [`Self::client_heartbeat`]-ing to keep it alive.
+    pub fn mount_segment_for(&self, client_id: &str, name: impl Into<SegmentName>, capacity: u64) {
+        let name = name.into();
+        self.mount_segment(name.clone(), capacity);
+        self.segment_owner
+            .lock()
+            .expect("segment_owner mutex poisoned")
+            .insert(name, client_id.to_string());
+    }
+
+    /// A client's liveness ping — refreshes the heartbeat of *every* segment it
+    /// owns (Mooncake's per-client `Ping`: one round-trip keeps all the client's
+    /// segments alive). A client that stops pinging lets its segments go stale.
+    pub fn client_heartbeat(&self, client_id: &str) {
+        let now = self.clock.load(Ordering::Relaxed);
+        let owned: Vec<SegmentName> = {
+            let owners = self
+                .segment_owner
+                .lock()
+                .expect("segment_owner mutex poisoned");
+            owners
+                .iter()
+                .filter(|(_, c)| c.as_str() == client_id)
+                .map(|(s, _)| s.clone())
+                .collect()
+        };
+        let mut hb = self
+            .segment_heartbeat
+            .lock()
+            .expect("heartbeat mutex poisoned");
+        for seg in owned {
+            hb.insert(seg, now);
+        }
+    }
+
+    /// Idempotently (re)mount a client's segments on (re)connect — Mooncake's
+    /// `ReMountSegment` after a client restart or Ping-TTL expiry. Already-mounted
+    /// segments just have their ownership reasserted; all are then refreshed.
+    pub fn remount_segments(&self, client_id: &str, segments: Vec<(SegmentName, u64)>) {
+        for (name, capacity) in segments {
+            let mounted = self
+                .segments()
+                .allocators
+                .iter()
+                .any(|a| a.segment_name() == name);
+            if mounted {
+                self.segment_owner
+                    .lock()
+                    .expect("segment_owner mutex poisoned")
+                    .insert(name, client_id.to_string());
+            } else {
+                self.mount_segment_for(client_id, name, capacity);
+            }
+        }
+        self.client_heartbeat(client_id);
+    }
+
+    /// Unmount a segment, but only by its owning client (Mooncake's
+    /// `UnmountSegment(segment_id, client_id)`). A non-owner is refused.
+    pub fn unmount_segment_for(&self, client_id: &str, name: &str) -> Result<(), ErrorCode> {
+        let owns = self
+            .segment_owner
+            .lock()
+            .expect("segment_owner mutex poisoned")
+            .get(name)
+            .is_some_and(|c| c == client_id);
+        if !owns {
+            return Err(ErrorCode::SegmentNotFound);
+        }
+        self.unmount_segment(name)
+    }
+
+    /// The segments a client currently owns.
+    pub fn segments_owned_by(&self, client_id: &str) -> Vec<SegmentName> {
+        self.segment_owner
+            .lock()
+            .expect("segment_owner mutex poisoned")
+            .iter()
+            .filter(|(_, c)| c.as_str() == client_id)
+            .map(|(s, _)| s.clone())
+            .collect()
     }
 
     // ---- HA: heartbeat-based segment health (Mooncake's client heartbeats) ----
@@ -1412,6 +1507,53 @@ mod tests {
             Err(ErrorCode::UnsafeReuse(ReuseViolation::Tenant))
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn client_owned_segments_die_when_the_client_stops_pinging() {
+        let m = MasterService::new("random");
+        m.set_segment_ttl(3);
+        m.mount_segment_for("client-a", "seg-a", 1000);
+        m.mount_segment_for("client-b", "seg-b", 1000);
+        assert_eq!(m.segments_owned_by("client-a"), vec!["seg-a".to_string()]);
+        assert!(m.segment_alive("seg-a") && m.segment_alive("seg-b"));
+        // Advance past the TTL; only client-b keeps pinging.
+        for _ in 0..5 {
+            m.tick();
+            m.client_heartbeat("client-b");
+        }
+        assert!(
+            !m.segment_alive("seg-a"),
+            "client-a stopped pinging → its segment is dead"
+        );
+        assert!(m.segment_alive("seg-b"), "client-b kept pinging → alive");
+        assert_eq!(m.dead_segments(), vec!["seg-a".to_string()]);
+    }
+
+    #[test]
+    fn remount_is_idempotent_and_unmount_checks_ownership() {
+        let m = MasterService::new("random");
+        m.remount_segments(
+            "client-a",
+            vec![("seg-0".into(), 1000), ("seg-1".into(), 1000)],
+        );
+        assert_eq!(m.segment_count(), 2);
+        // Re-mounting the same set is a no-op — no duplicate allocators.
+        m.remount_segments(
+            "client-a",
+            vec![("seg-0".into(), 1000), ("seg-1".into(), 1000)],
+        );
+        assert_eq!(m.segment_count(), 2);
+        // A different client cannot unmount client-a's segment.
+        assert_eq!(
+            m.unmount_segment_for("client-b", "seg-0"),
+            Err(ErrorCode::SegmentNotFound)
+        );
+        assert_eq!(m.segment_count(), 2);
+        // The owner can.
+        m.unmount_segment_for("client-a", "seg-0").unwrap();
+        assert_eq!(m.segment_count(), 1);
+        assert_eq!(m.segments_owned_by("client-a"), vec!["seg-1".to_string()]);
     }
 
     #[test]
