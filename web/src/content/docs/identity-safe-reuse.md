@@ -52,4 +52,5 @@ keeping every safe same-identity hit.
 
 It is the **same guard** in memory (`LocalKvStore`), on disk (`DiskTier`), and at
 the master (`MasterService`) — and it still holds after a crash and recovery. This
-is QuillCache's addition; Mooncake's keys are identity-agnostic.
+is QuillCache's addition: Mooncake isolates by `tenant_id` but not by model /
+tokenizer / adapter, so this extends the guard to the full identity.

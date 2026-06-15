@@ -162,14 +162,18 @@ QuillCache makes the contract explicit: every block carries an `IdentityScope`
 (model · tokenizer · adapter · tenant), and the guard is enforced at **every**
 serving point — `LocalKvStore::get` and `DiskTier::get` (the byte tiers) and
 `MasterService::get_replica_list` (the metadata layer, *before* any byte moves) —
-refusing a cross-identity read with `ReuseViolation` rather than leaking. Mooncake
-keys are identity-agnostic; this is QuillCache's addition, and it is the same
-guard in memory, on disk, and after crash recovery.
+refusing a cross-identity read with `ReuseViolation` rather than leaking.
+Mooncake's store already isolates by `tenant_id`, but not by model / tokenizer /
+adapter — so QuillCache's addition is extending the guard to the **full**
+identity (the model / tokenizer / adapter correctness axes), enforced the same
+way in memory, on disk, and after crash recovery.
 
 ## Crash-consistent durable tier
 
-Mooncake's pool is volatile DRAM. QuillCache adds a durable `DiskTier` for `Disk`
-replicas, so KV bytes survive a restart — backed by `LocalKvStore`'s SSD tier,
+Mooncake's local byte-disk tier recovers by scanning on-disk files and trusting
+them by size — no per-block validation. QuillCache's `DiskTier` adds block-level
+integrity for `Disk` replicas, so KV bytes survive a restart **and** torn /
+half-written / corrupted blocks are caught — backed by `LocalKvStore`'s SSD tier,
 which uses NoKV-style **object-first atomic publish + a WAL**: write the block
 file → `fsync` → append + `fsync` a commit record (the single publish point). On
 `recover` the WAL is replayed and each surviving commit is verified against its
@@ -182,8 +186,10 @@ by test:
 - a **corrupted** block (length / CRC mismatch) is dropped on recovery;
 - a missing file never becomes a **dangling pointer** (no stale entries recovered).
 
-This is the seam Mooncake's volatile-DRAM pool does not occupy: a durable,
-crash-consistent, immediately-reusable persistent tier.
+This is the byte-tier integrity Mooncake's trust-by-size recovery does not
+provide: a durable, crash-consistent, immediately-reusable persistent tier.
+(Mooncake's *metadata* HA — its OpLog — is itself crash-consistent; this refines
+the *byte* tier it leaves unchecked.)
 
 ## Quick start
 

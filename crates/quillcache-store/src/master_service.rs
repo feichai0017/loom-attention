@@ -14,14 +14,18 @@
 //!
 //! **QuillCache's identity guard** is woven into [`MasterService::get_replica_list`]:
 //! each object records the [`IdentityScope`] that wrote it, and a get from a
-//! mismatched identity is refused with [`ErrorCode::UnsafeReuse`] — Mooncake keys
-//! are identity-agnostic, so this is our addition.
+//! mismatched identity is refused with [`ErrorCode::UnsafeReuse`] — Mooncake
+//! isolates by `tenant_id` but not by model / tokenizer / adapter, so extending
+//! the guard to the full identity is our addition.
 
 use crate::allocation_strategy::{create_allocation_strategy, AllocationStrategy};
-use crate::allocator::{AllocatedBuffer, BufferAllocator, OffsetBufferAllocator};
+use crate::allocator::{AllocatedBuffer, BufferAllocator};
+use crate::count_min_sketch::CountMinSketch;
+use crate::offset_allocator::OffsetBufferAllocator;
 use crate::replica::{Replica, ReplicaData, ReplicaList, ReplicaStatus};
 use crate::types::{ErrorCode, ObjectKey, ReplicaId, ReplicateConfig, SegmentName};
 use quillcache_core::IdentityScope;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -102,6 +106,9 @@ pub struct MasterService {
     /// Ticks a segment may miss before it is treated as dead. `0` disables the
     /// health check (every mounted segment is considered alive).
     segment_ttl: u64,
+    /// Approximate per-key access frequency (Mooncake's CountMinSketch), bumped on
+    /// every guarded read so eviction / promotion can favour hot keys.
+    hotness: CountMinSketch,
 }
 
 impl MasterService {
@@ -118,6 +125,7 @@ impl MasterService {
             eviction_ratio: 0.1,
             segment_heartbeat: HashMap::new(),
             segment_ttl: 0,
+            hotness: CountMinSketch::default(),
         }
     }
 
@@ -267,6 +275,8 @@ impl MasterService {
     ) -> Result<Vec<Replica>, ErrorCode> {
         let now = self.clock;
         let lease_ttl = self.lease_ttl;
+        // Record this access in the frequency sketch (hot-key tracking).
+        self.hotness.increment(key);
         // Failure detection: a Memory replica on a segment whose node stopped
         // heartbeating is treated as lost; a Disk replica is durable, so kept.
         let alive: HashSet<String> = self
@@ -338,6 +348,78 @@ impl MasterService {
         Ok(())
     }
 
+    /// Revoke many in-flight Puts (free their allocations). Errors on the first
+    /// key not in flight.
+    pub fn batch_put_revoke(&mut self, keys: &[String]) -> Result<(), ErrorCode> {
+        for key in keys {
+            self.put_revoke(key)?;
+        }
+        Ok(())
+    }
+
+    // ---- upsert (Mooncake's UpsertStart/End/Revoke) ----
+
+    /// Mooncake's `UpsertStart`. If the key is absent (or only in-flight) this is
+    /// [`Self::put_start`]. If it exists complete at the **same** size, reuse its
+    /// buffers in place — return them and flip the replicas back to `Initialized`
+    /// so the client rewrites them (no re-allocation). If the size **differs**,
+    /// free the old replicas and allocate new ones. Refused with
+    /// [`ErrorCode::ObjectNotReady`] while a read lease is active (the object is
+    /// busy), mirroring Mooncake's `OBJECT_REPLICA_BUSY`.
+    pub fn upsert_start(
+        &mut self,
+        key: ObjectKey,
+        identity: IdentityScope,
+        size: u64,
+        config: &ReplicateConfig,
+    ) -> Result<Vec<AllocatedBuffer>, ErrorCode> {
+        let (exists_complete, leased, existing_size) = match self.objects.get(&key) {
+            None => (false, false, 0),
+            Some(o) => (
+                o.has_complete_replica(),
+                o.lease_until > self.clock,
+                o.replicas.values().next().map(|r| r.size()).unwrap_or(0),
+            ),
+        };
+        if !exists_complete {
+            // Absent or only an in-flight leftover — PutStart reclaims + allocates.
+            return self.put_start(key, identity, size, config);
+        }
+        if leased {
+            return Err(ErrorCode::ObjectNotReady);
+        }
+        if existing_size == size {
+            // In-place: reuse the existing buffers, re-open for writing.
+            let now = self.clock;
+            let object = self.objects.get_mut(&key).expect("object present");
+            object.identity = identity;
+            object.last_access = now;
+            let mut buffers = Vec::new();
+            for replica in object.replicas.values_mut() {
+                replica.status = ReplicaStatus::Initialized;
+                if let ReplicaData::Memory(buffer) = &replica.data {
+                    buffers.push(buffer.clone());
+                }
+            }
+            Ok(buffers)
+        } else {
+            // Size changed: free the old replicas, then allocate fresh.
+            let old = self.objects.remove(&key).expect("object present");
+            self.free_replicas(&old.replicas);
+            self.put_start(key, identity, size, config)
+        }
+    }
+
+    /// Mooncake's `UpsertEnd` — same as committing a Put.
+    pub fn upsert_end(&mut self, key: &str) -> Result<(), ErrorCode> {
+        self.put_end(key)
+    }
+
+    /// Mooncake's `UpsertRevoke` — same as aborting a Put.
+    pub fn upsert_revoke(&mut self, key: &str) -> Result<(), ErrorCode> {
+        self.put_revoke(key)
+    }
+
     /// Identity-guarded Get for many keys. Errors on the first key that is
     /// missing / not ready / refused (the connector wants all of a prefix's
     /// layers, or it recomputes the prefix).
@@ -357,6 +439,38 @@ impl MasterService {
         self.objects
             .get(key)
             .is_some_and(ObjectMetadata::has_complete_replica)
+    }
+
+    /// Existence for many keys in one call (Mooncake's `BatchExistKey`).
+    pub fn batch_exist_key(&self, keys: &[String]) -> Vec<bool> {
+        keys.iter().map(|k| self.exist_key(k)).collect()
+    }
+
+    /// Mooncake's `GetReplicaListByRegex`: every object whose key matches
+    /// `pattern` and whose identity the requester is allowed to read, mapped to
+    /// its complete replicas. Cross-identity matches are skipped (the guard), not
+    /// errored — a bulk query returns what the caller may see.
+    pub fn get_replica_list_by_regex(
+        &mut self,
+        pattern: &str,
+        requester: &IdentityScope,
+    ) -> Result<HashMap<String, Vec<Replica>>, ErrorCode> {
+        let re = Regex::new(pattern).map_err(|e| ErrorCode::Io(format!("bad regex: {e}")))?;
+        // Collect matching keys first so the &mut get_replica_list calls don't
+        // alias the iteration over `objects`.
+        let keys: Vec<String> = self
+            .objects
+            .keys()
+            .filter(|k| re.is_match(k))
+            .cloned()
+            .collect();
+        let mut out = HashMap::new();
+        for key in keys {
+            if let Ok(replicas) = self.get_replica_list(&key, requester) {
+                out.insert(key, replicas);
+            }
+        }
+        Ok(out)
     }
 
     /// Remove an object and free its replicas. Blocked while a read lease is
@@ -387,6 +501,12 @@ impl MasterService {
     }
     pub fn allocated(&self) -> u64 {
         self.allocators.iter().map(|a| a.allocated()).sum()
+    }
+
+    /// Approximate access frequency for `key` (Mooncake's CountMinSketch
+    /// estimate) — how hot the key is, for frequency-aware eviction / promotion.
+    pub fn hotness(&self, key: &str) -> u8 {
+        self.hotness.count(key)
     }
 
     // ---- HA: snapshot + recovery (Mooncake's metadata snapshot thread) ----
@@ -879,5 +999,137 @@ mod tests {
             .is_err());
         assert_eq!(m.object_count(), 0);
         assert_eq!(m.allocated(), 0);
+    }
+
+    #[test]
+    fn upsert_reuses_buffers_in_place_when_size_unchanged() {
+        let mut m = MasterService::new("random");
+        m.mount_segment("seg-0", 1000);
+        let id = scope("ten-a");
+        let bufs = m
+            .put_start("k".into(), id.clone(), 64, &ReplicateConfig::replicas(1))
+            .unwrap();
+        m.put_end("k").unwrap();
+        let off = bufs[0].offset;
+        let used = m.allocated();
+        // Same size → reuse the buffer in place, no extra allocation.
+        let bufs2 = m
+            .upsert_start("k".into(), id.clone(), 64, &ReplicateConfig::replicas(1))
+            .unwrap();
+        assert_eq!(bufs2[0].offset, off, "in-place upsert reuses the buffer");
+        assert_eq!(
+            m.allocated(),
+            used,
+            "no re-allocation for a same-size upsert"
+        );
+        assert!(!m.exist_key("k"), "re-opened for writing until committed");
+        m.upsert_end("k").unwrap();
+        assert!(m.exist_key("k"));
+    }
+
+    #[test]
+    fn upsert_reallocates_when_size_changes() {
+        let mut m = MasterService::new("random");
+        m.mount_segment("seg-0", 1000);
+        let id = scope("ten-a");
+        m.put_start("k".into(), id.clone(), 40, &ReplicateConfig::replicas(1))
+            .unwrap();
+        m.put_end("k").unwrap();
+        assert_eq!(m.allocated(), 40);
+        m.upsert_start("k".into(), id.clone(), 100, &ReplicateConfig::replicas(1))
+            .unwrap();
+        m.upsert_end("k").unwrap();
+        assert_eq!(m.allocated(), 100, "size change frees old + allocates new");
+    }
+
+    #[test]
+    fn upsert_is_refused_while_leased() {
+        let mut m = MasterService::new("random");
+        m.mount_segment("seg-0", 1000);
+        let id = scope("ten-a");
+        m.put_start("k".into(), id.clone(), 64, &ReplicateConfig::replicas(1))
+            .unwrap();
+        m.put_end("k").unwrap();
+        m.get_replica_list("k", &id).unwrap(); // grants a read lease → busy
+        assert_eq!(
+            m.upsert_start("k".into(), id.clone(), 64, &ReplicateConfig::replicas(1)),
+            Err(ErrorCode::ObjectNotReady)
+        );
+    }
+
+    #[test]
+    fn get_replica_list_by_regex_matches_allowed_keys_only() {
+        let mut m = MasterService::new("random");
+        m.mount_segment("seg-0", 1000);
+        let a = scope("ten-a");
+        let b = scope("ten-b");
+        for k in ["qc/a/1", "qc/a/2", "other"] {
+            m.put_start(k.into(), a.clone(), 16, &ReplicateConfig::replicas(1))
+                .unwrap();
+            m.put_end(k).unwrap();
+        }
+        // Same-pattern key under a different tenant must NOT leak to tenant-a.
+        m.put_start("qc/a/secret".into(), b, 16, &ReplicateConfig::replicas(1))
+            .unwrap();
+        m.put_end("qc/a/secret").unwrap();
+
+        let got = m.get_replica_list_by_regex("^qc/a/.*", &a).unwrap();
+        let mut keys: Vec<&str> = got.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["qc/a/1", "qc/a/2"]);
+    }
+
+    #[test]
+    fn batch_exist_key_reports_committed_only() {
+        let mut m = MasterService::new("random");
+        m.mount_segment("seg-0", 1000);
+        let id = scope("ten-a");
+        let items = vec![
+            ("a".to_string(), id.clone(), 16u64),
+            ("b".to_string(), id.clone(), 16u64),
+        ];
+        m.batch_put_start(items, &ReplicateConfig::replicas(1))
+            .unwrap();
+        assert_eq!(
+            m.batch_exist_key(&["a".into(), "b".into()]),
+            vec![false, false]
+        );
+        m.batch_put_end(&["a".into(), "b".into()]).unwrap();
+        assert_eq!(
+            m.batch_exist_key(&["a".into(), "b".into(), "z".into()]),
+            vec![true, true, false]
+        );
+    }
+
+    #[test]
+    fn batch_put_revoke_frees_inflight() {
+        let mut m = MasterService::new("random");
+        m.mount_segment("seg-0", 1000);
+        let id = scope("ten-a");
+        let items = vec![
+            ("a".to_string(), id.clone(), 16u64),
+            ("b".to_string(), id, 16u64),
+        ];
+        m.batch_put_start(items, &ReplicateConfig::replicas(1))
+            .unwrap();
+        m.batch_put_revoke(&["a".into(), "b".into()]).unwrap();
+        assert_eq!(m.allocated(), 0);
+        assert_eq!(m.object_count(), 0);
+    }
+
+    #[test]
+    fn guarded_reads_bump_key_hotness() {
+        let mut m = MasterService::new("random");
+        m.mount_segment("seg-0", 1000);
+        let id = scope("ten-a");
+        m.put_start("hot".into(), id.clone(), 16, &ReplicateConfig::replicas(1))
+            .unwrap();
+        m.put_end("hot").unwrap();
+        assert_eq!(m.hotness("hot"), 0);
+        for _ in 0..5 {
+            m.get_replica_list("hot", &id).unwrap();
+        }
+        assert_eq!(m.hotness("hot"), 5, "each guarded read bumps the sketch");
+        assert_eq!(m.hotness("cold"), 0);
     }
 }

@@ -2,7 +2,8 @@
 //! bytes can live in several places at once; each is a [`Replica`]. A replica is
 //! either in a mounted RAM segment ([`ReplicaData::Memory`]) or on a node's
 //! durable disk tier ([`ReplicaData::Disk`]) — the latter is QuillCache's
-//! crash-consistent persistent tier (Mooncake's pool is volatile DRAM).
+//! crash-consistent persistent tier (block-level WAL + CRC on recovery, which
+//! Mooncake's trust-by-size byte tier omits).
 
 use crate::allocator::AllocatedBuffer;
 use crate::types::ReplicaId;

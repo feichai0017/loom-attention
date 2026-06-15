@@ -72,8 +72,9 @@ pub enum ErrorCode {
     Io(String),
     /// QuillCache's identity guard: the object is resident but was written by a
     /// different identity, so serving it would be a cross-tenant leak or a
-    /// cross-adapter/model correctness error. Mooncake keys are identity-agnostic;
-    /// this variant is our addition.
+    /// cross-adapter/model correctness error. Mooncake isolates by `tenant_id`
+    /// but not by model / tokenizer / adapter; extending the guard to the full
+    /// identity is our addition.
     #[error("unsafe cross-identity reuse refused ({0:?})")]
     UnsafeReuse(quillcache_core::ReuseViolation),
 }

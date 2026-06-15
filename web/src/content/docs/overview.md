@@ -53,7 +53,8 @@ how far each piece is integrated:
 ## Differentiation
 
 The reference designs (Mooncake / Dynamo / LMCache / KVBM) key reuse on a
-block's **content hash** and keep the cache mostly volatile. QuillCache adds:
+block's **content hash** (Mooncake adds only a tenant scope) and leave byte-tier
+crash-integrity to the caller. QuillCache adds:
 
 1. **Identity-governed safe reuse** — a block is served only when the requester's
    model · tokenizer · adapter · tenant matches, so cross-tenant leaks and
@@ -64,4 +65,4 @@ block's **content hash** and keep the cache mostly volatile. QuillCache adds:
 2. **A crash-consistent persistent tier** — a durable `DiskTier` survives a
    restart with object-first atomic publish + a WAL, so durable blocks are
    immediately reusable and corrupt/half-written ones are never served (Mooncake's
-   pool is volatile DRAM). See [Crash-consistent tier](/crash-consistency/).
+   byte tier trusts on-disk files by size on recovery). See [Crash-consistent tier](/crash-consistency/).

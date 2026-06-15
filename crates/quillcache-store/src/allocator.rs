@@ -1,12 +1,14 @@
 //! Buffer allocator (Mooncake's `mooncake-store/include/allocator.h` +
 //! `offset_allocator/`). A mounted RAM segment is a fixed-size byte arena; the
-//! allocator hands out offset ranges within it. Two backends behind the
+//! allocator hands out offset ranges within it. The store's default is the
+//! faithful Aaltonen port in [`crate::offset_allocator`] (Mooncake's
+//! `OffsetBufferAllocator`); these are two simpler alternatives behind the
 //! [`BufferAllocator`] trait:
-//! - [`OffsetBufferAllocator`] — a first-fit free-list with coalescing-on-free
-//!   (simple, the default; alloc scans the free list).
-//! - [`BinnedBufferAllocator`] — Mooncake's size-binned design: free regions are
-//!   bucketed by size class and a bitmask finds the smallest fitting bin in O(1)
-//!   (alloc is O(1) bin-select; coalescing on free uses a by-offset index).
+//! - [`FirstFitBufferAllocator`] — a first-fit free-list with coalescing-on-free
+//!   (simple; alloc scans the free list — O(n)).
+//! - [`BinnedBufferAllocator`] — a 64-bin power-of-two approximation of the
+//!   offset allocator (O(1) bin-select via a `u64` bitmask, but the floor bin is
+//!   scanned for a fit; superseded by the faithful 256-bin port).
 
 use crate::types::SegmentName;
 use serde::{Deserialize, Serialize};
@@ -49,7 +51,7 @@ pub trait BufferAllocator: std::fmt::Debug + Send + Sync {
 /// First-fit offset allocator over a sorted free-list of `offset -> length`
 /// regions, coalescing adjacent free ranges on `deallocate`.
 #[derive(Debug)]
-pub struct OffsetBufferAllocator {
+pub struct FirstFitBufferAllocator {
     segment_name: SegmentName,
     capacity: u64,
     /// Non-overlapping free regions, keyed by offset (so neighbours are adjacent).
@@ -57,7 +59,7 @@ pub struct OffsetBufferAllocator {
     allocated: u64,
 }
 
-impl OffsetBufferAllocator {
+impl FirstFitBufferAllocator {
     pub fn new(segment_name: impl Into<SegmentName>, capacity: u64) -> Self {
         let mut free = BTreeMap::new();
         if capacity > 0 {
@@ -72,7 +74,7 @@ impl OffsetBufferAllocator {
     }
 }
 
-impl BufferAllocator for OffsetBufferAllocator {
+impl BufferAllocator for FirstFitBufferAllocator {
     fn segment_name(&self) -> &str {
         &self.segment_name
     }
@@ -167,7 +169,7 @@ impl BufferAllocator for OffsetBufferAllocator {
 /// bucketed by size class (bin `k` holds regions of size in `[2^k, 2^(k+1))`); a
 /// `u64` bitmask of non-empty bins finds the smallest fitting bin in O(1), so
 /// `allocate` does not scan the whole free list. Coalescing on `deallocate` uses
-/// a by-offset index. Same contract as [`OffsetBufferAllocator`].
+/// a by-offset index. Same contract as [`FirstFitBufferAllocator`].
 #[derive(Debug)]
 pub struct BinnedBufferAllocator {
     segment_name: SegmentName,
@@ -339,7 +341,7 @@ mod tests {
 
     #[test]
     fn allocate_split_and_fail_when_too_fragmented() {
-        let mut a = OffsetBufferAllocator::new("seg-0", 100);
+        let mut a = FirstFitBufferAllocator::new("seg-0", 100);
         let b1 = a.allocate(40).unwrap();
         assert_eq!(b1.offset, 0);
         let b2 = a.allocate(40).unwrap();
@@ -352,7 +354,7 @@ mod tests {
 
     #[test]
     fn deallocate_coalesces_adjacent_free_regions() {
-        let mut a = OffsetBufferAllocator::new("seg-0", 100);
+        let mut a = FirstFitBufferAllocator::new("seg-0", 100);
         let b1 = a.allocate(50).unwrap(); // [0,50)
         let b2 = a.allocate(50).unwrap(); // [50,100) — segment full
         assert_eq!(a.largest_free_region(), 0);

@@ -1,8 +1,10 @@
 //! Crash-consistent durable tier for the store's `Disk` replicas — QuillCache's
-//! persistent, immediately-reusable tier. **Mooncake's pool is volatile DRAM**,
-//! so a durable replica surviving a process restart is our 2nd differentiator
-//! (the seam from the novelty positioning: the safety invariant held across
-//! tiering / eviction / crash-recovery).
+//! persistent, immediately-reusable tier. **Mooncake's local byte tier recovers
+//! by trusting on-disk files by size**, so block-level integrity on recovery
+//! (WAL + CRC, dropping torn / half-written / corrupt blocks) is our 2nd
+//! differentiator (the seam from the novelty positioning: the safety invariant
+//! held across tiering / eviction / crash-recovery). Mooncake's *metadata* HA is
+//! itself crash-consistent; this refines the *byte* tier.
 //!
 //! It reuses [`LocalKvStore`]'s SSD tier — object-first atomic publish (file
 //! fsynced, then a single WAL commit fsynced) + recover-on-reopen + the identity
