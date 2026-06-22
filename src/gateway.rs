@@ -582,6 +582,18 @@ impl CoSchedulerActuator {
         let mut saw_admission_reject = false;
         for action in &plan.actions {
             match action.kind {
+                CoSchedulerActionKind::AdjustPdRatio => {
+                    let changed = control.apply_pd_ratio_adjustment(action.value.as_deref());
+                    applied.push(applied_action(
+                        action,
+                        !changed.is_empty(),
+                        if changed.is_empty() {
+                            "pd roles already satisfy requested ratio".to_string()
+                        } else {
+                            format!("updated pd roles: {}", changed.join(","))
+                        },
+                    ));
+                }
                 CoSchedulerActionKind::AdmissionReject => {
                     saw_admission_reject = true;
                     control.set_admission_slo_limit(self.config.admission_slo_violation_limit_us);
@@ -2091,6 +2103,58 @@ mod tests {
             &mut control,
         );
         assert_eq!(actuator.snapshot(&control).transfer_max_inflight, 1);
+    }
+
+    #[test]
+    fn co_scheduler_pd_ratio_action_updates_worker_roles() {
+        let engine_a = EngineEndpoint {
+            id: "worker-a".to_string(),
+            kind: quillcache_core::EngineKind::Vllm,
+            role: quillcache_core::EngineRole::Aggregated,
+            base_url: "http://127.0.0.1:8000".to_string(),
+            model_id: "model".to_string(),
+            tokenizer_id: "tok".to_string(),
+            tenant_id: "tenant".to_string(),
+            locality_domain: "local".to_string(),
+        };
+        let engine_b = EngineEndpoint {
+            id: "worker-b".to_string(),
+            base_url: "http://127.0.0.1:8001".to_string(),
+            ..engine_a.clone()
+        };
+        let mut control = ControlPlane::new(vec![engine_a, engine_b]);
+        let mut actuator = CoSchedulerActuator::new(Some(CoSchedulerConfig::default()));
+        let action = CoSchedulerAction {
+            epoch: 1,
+            kind: CoSchedulerActionKind::AdjustPdRatio,
+            target_worker_id: None,
+            source_worker_id: None,
+            prefix_hash: None,
+            tier: None,
+            value: Some("split_aggregated_worker_for_pd".to_string()),
+            reason: "ttft pressure".to_string(),
+        };
+
+        let applied = actuator.apply(
+            &CoSchedulerPlan {
+                epoch: 1,
+                dry_run: false,
+                actions: vec![action],
+            },
+            &CoSchedulerSnapshot::default(),
+            &mut control,
+        );
+
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].applied);
+        assert!(control
+            .workers()
+            .iter()
+            .any(|worker| worker.role == quillcache_core::EngineRole::Prefill));
+        assert!(control
+            .workers()
+            .iter()
+            .any(|worker| worker.role == quillcache_core::EngineRole::Decode));
     }
 
     #[test]

@@ -852,6 +852,150 @@ impl ControlPlane {
         actions
     }
 
+    /// Apply a gateway-local P/D role adjustment. This is the actuator form of the
+    /// co-scheduler's `AdjustPdRatio` action: it changes the planner's worker roles
+    /// immediately, while an external deployment system can later bind the same
+    /// action to real worker-pool resizing.
+    pub fn apply_pd_ratio_adjustment(&mut self, value: Option<&str>) -> Vec<String> {
+        if self.workers.len() < 2 {
+            return Vec::new();
+        }
+        match value.unwrap_or("rebalance_prefill_decode_share") {
+            "split_aggregated_worker_for_pd" => self.ensure_pd_split(),
+            "increase_prefill_share" => self.increase_prefill_share(),
+            "rebalance_prefill_decode_share" => self.rebalance_pd_share(),
+            _ => self.rebalance_pd_share(),
+        }
+    }
+
+    fn ensure_pd_split(&mut self) -> Vec<String> {
+        let mut changed = Vec::new();
+        if !self
+            .workers
+            .iter()
+            .any(|worker| worker.role == EngineRole::Prefill)
+        {
+            if let Some(id) = self
+                .workers
+                .iter()
+                .filter(|worker| worker.role != EngineRole::Decode)
+                .min_by_key(|worker| worker.queued_prefill_tokens + worker.running_decodes)
+                .map(|worker| worker.id.clone())
+            {
+                if self.set_worker_role(&id, EngineRole::Prefill) {
+                    changed.push(format!("{id}:prefill"));
+                }
+            }
+        }
+        if !self
+            .workers
+            .iter()
+            .any(|worker| worker.role == EngineRole::Decode)
+        {
+            if let Some(id) = self
+                .workers
+                .iter()
+                .filter(|worker| worker.role != EngineRole::Prefill)
+                .min_by_key(|worker| worker.queued_prefill_tokens + worker.running_decodes)
+                .map(|worker| worker.id.clone())
+            {
+                if self.set_worker_role(&id, EngineRole::Decode) {
+                    changed.push(format!("{id}:decode"));
+                }
+            }
+        }
+        changed
+    }
+
+    fn increase_prefill_share(&mut self) -> Vec<String> {
+        let decode_count = self
+            .workers
+            .iter()
+            .filter(|worker| worker.role.can_decode())
+            .count();
+        if decode_count <= 1 {
+            return self.ensure_pd_split();
+        }
+        let Some(id) = self
+            .workers
+            .iter()
+            .filter(|worker| worker.role == EngineRole::Decode)
+            .min_by_key(|worker| worker.running_decodes)
+            .map(|worker| worker.id.clone())
+        else {
+            return self.ensure_pd_split();
+        };
+        if self.set_worker_role(&id, EngineRole::Prefill) {
+            vec![format!("{id}:prefill")]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn rebalance_pd_share(&mut self) -> Vec<String> {
+        let prefill_count = self
+            .workers
+            .iter()
+            .filter(|worker| worker.role == EngineRole::Prefill)
+            .count();
+        let decode_count = self
+            .workers
+            .iter()
+            .filter(|worker| worker.role == EngineRole::Decode)
+            .count();
+        if prefill_count == 0 || decode_count == 0 {
+            return self.ensure_pd_split();
+        }
+        if prefill_count > decode_count + 1 {
+            if let Some(id) = self
+                .workers
+                .iter()
+                .filter(|worker| worker.role == EngineRole::Prefill)
+                .min_by_key(|worker| worker.queued_prefill_tokens)
+                .map(|worker| worker.id.clone())
+            {
+                if self.set_worker_role(&id, EngineRole::Decode) {
+                    return vec![format!("{id}:decode")];
+                }
+            }
+        } else if decode_count > prefill_count + 1 {
+            if let Some(id) = self
+                .workers
+                .iter()
+                .filter(|worker| worker.role == EngineRole::Decode)
+                .min_by_key(|worker| worker.running_decodes)
+                .map(|worker| worker.id.clone())
+            {
+                if self.set_worker_role(&id, EngineRole::Prefill) {
+                    return vec![format!("{id}:prefill")];
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    fn set_worker_role(&mut self, worker_id: &str, role: EngineRole) -> bool {
+        let mut changed = false;
+        if let Some(worker) = self
+            .workers
+            .iter_mut()
+            .find(|worker| worker.id == worker_id)
+        {
+            if worker.role != role {
+                worker.role = role;
+                changed = true;
+            }
+        }
+        if let Some(engine) = self
+            .engines
+            .iter_mut()
+            .find(|engine| engine.id == worker_id)
+        {
+            engine.role = role;
+        }
+        changed
+    }
+
     /// Decide which hot prefixes to replicate to spread cache hotspots: live
     /// access counts (the request path feeds the hotness tracker) crossed with
     /// where each hot prefix is resident (HBM) and current worker load. The cost
@@ -1346,6 +1490,41 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(holders.contains(&"vllm-a".to_string()));
         assert!(holders.contains(&"vllm-b".to_string()));
+    }
+
+    #[test]
+    fn pd_ratio_adjustment_updates_planner_roles() {
+        let mut control = ControlPlane::new(vec![
+            engine(),
+            EngineEndpoint {
+                id: "vllm-b".to_string(),
+                base_url: "http://127.0.0.1:8002".to_string(),
+                ..engine()
+            },
+        ]);
+        assert!(control
+            .workers()
+            .iter()
+            .all(|worker| worker.role == EngineRole::Aggregated));
+
+        let changed = control.apply_pd_ratio_adjustment(Some("split_aggregated_worker_for_pd"));
+        assert_eq!(changed.len(), 2);
+        assert!(control
+            .workers()
+            .iter()
+            .any(|worker| worker.role == EngineRole::Prefill));
+        assert!(control
+            .workers()
+            .iter()
+            .any(|worker| worker.role == EngineRole::Decode));
+        assert_eq!(
+            control.engine("vllm-a").map(|engine| engine.role),
+            control
+                .workers()
+                .iter()
+                .find(|worker| worker.id == "vllm-a")
+                .map(|worker| worker.role)
+        );
     }
 
     #[test]
