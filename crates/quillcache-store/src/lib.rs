@@ -935,6 +935,70 @@ impl DataPlane for StoreDataPlane {
         update
     }
 
+    fn replicate_prefix(
+        &mut self,
+        source_worker_id: &str,
+        target_worker_id: &str,
+        prefix_hash: &str,
+        target_tier: CacheTier,
+    ) -> DataPlaneUpdate {
+        if source_worker_id == target_worker_id {
+            return DataPlaneUpdate::default();
+        }
+        let source_entries = self
+            .workers
+            .get(source_worker_id)
+            .map(|worker| {
+                worker
+                    .entries
+                    .values()
+                    .filter(|entry| entry.residency.key.prefix_hash == prefix_hash)
+                    .map(|entry| entry.residency.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut combined = DataPlaneUpdate::default();
+        for source in source_entries {
+            if let Some(bytes) = self
+                .byte_pools
+                .get(source_worker_id)
+                .and_then(|pool| pool.get_raw(&source.key))
+            {
+                if let Ok(pool) = self.byte_pool_mut(target_worker_id) {
+                    pool.put_dram(source.key.clone(), bytes);
+                }
+            }
+
+            let mut replica = source.clone();
+            replica.worker_id = target_worker_id.to_string();
+            replica.tier = target_tier;
+            replica.ref_count = 0;
+            let mut update = self.place(replica.clone());
+            let bytes = replica.bytes;
+            update.actions.insert(
+                0,
+                DataPlaneAction {
+                    kind: DataPlaneActionKind::Replicate,
+                    worker_id: target_worker_id.to_string(),
+                    key: replica.key,
+                    from_tier: Some(source.tier),
+                    to_tier: Some(target_tier),
+                    bytes,
+                    estimated_us: self.cost.transfer_cost_us(
+                        source.tier,
+                        source.bytes,
+                        false,
+                        true,
+                    ),
+                },
+            );
+            combined.actions.extend(update.actions);
+            combined.resident.extend(update.resident);
+            combined.removed.extend(update.removed);
+        }
+        combined
+    }
+
     fn clear_worker(&mut self, worker_id: &str) -> DataPlaneUpdate {
         self.byte_pools.remove(worker_id);
         let Some(worker) = self.workers.remove(worker_id) else {
@@ -1139,6 +1203,29 @@ mod tests {
         // ...and the real bytes are on disk and read back, identity-guarded.
         assert_eq!(&dp.get("w0", &f1).unwrap()[..], b"01234567");
         assert_eq!(&dp.get("w0", &f2).unwrap()[..], b"89abcdef");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn store_data_plane_replicates_hot_prefix_bytes_to_target_worker() {
+        let dir = tmp("replicate");
+        let mut dp = StoreDataPlane::new(StoreTierConfig {
+            hbm_capacity_bytes: 1 << 20,
+            cpu_dram_capacity_bytes: 1 << 20,
+            local_ssd_capacity_bytes: 1 << 20,
+        })
+        .with_dir(&dir);
+        let k = key("ten-a", "hot");
+        dp.put("w0", k.clone(), Bytes::from_static(b"hot-prefix-kv"))
+            .unwrap();
+
+        let update = dp.replicate_prefix("w0", "w1", "p", CacheTier::Hbm);
+        assert!(update
+            .actions
+            .iter()
+            .any(|action| action.kind == DataPlaneActionKind::Replicate));
+        assert_eq!(dp.tier_of("w1", &k), Some(CacheTier::Hbm));
+        assert_eq!(&dp.get("w1", &k).unwrap()[..], b"hot-prefix-kv");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

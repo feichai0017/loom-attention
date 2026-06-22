@@ -6,9 +6,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use quillcache_core::{
-    AdmissionDecision, CacheObservation, CoScheduler, CoSchedulerAction, CoSchedulerActionKind,
-    CoSchedulerPlan, CoSchedulerSnapshot, CoSchedulerTelemetry, ControlPlane, IngestSummary,
-    PlanAction, PlanActionKind, RequestPlan, ServingMode, SloObservation, TransferObservation,
+    AdmissionDecision, CacheObservation, CacheTier, CoScheduler, CoSchedulerAction,
+    CoSchedulerActionKind, CoSchedulerPlan, CoSchedulerSnapshot, CoSchedulerTelemetry,
+    ControlPlane, IngestSummary, PlanAction, PlanActionKind, RequestPlan, ServingMode,
+    SloObservation, TransferObservation,
 };
 use quillcache_core::{
     DataPlane, DataPlaneAction, EngineEndpoint, ExternalKvBlockKey, IndexBackend, KvBlockKey,
@@ -528,15 +529,47 @@ impl CoSchedulerActuator {
         let mut applied = Vec::new();
         let mut saw_admission_reject = false;
         for action in &plan.actions {
-            if action.kind == CoSchedulerActionKind::AdmissionReject {
-                saw_admission_reject = true;
-                control.set_admission_slo_limit(self.config.admission_slo_violation_limit_us);
-                self.admission_reject_enabled = true;
-                applied.push(applied_action(
-                    action,
-                    true,
-                    "enabled gateway admission rejection",
-                ));
+            match action.kind {
+                CoSchedulerActionKind::AdmissionReject => {
+                    saw_admission_reject = true;
+                    control.set_admission_slo_limit(self.config.admission_slo_violation_limit_us);
+                    self.admission_reject_enabled = true;
+                    applied.push(applied_action(
+                        action,
+                        true,
+                        "enabled gateway admission rejection",
+                    ));
+                }
+                CoSchedulerActionKind::ReplicateHotPrefix => {
+                    let Some(source_worker_id) = action.source_worker_id.as_deref() else {
+                        applied.push(applied_action(action, false, "missing source worker"));
+                        continue;
+                    };
+                    let Some(target_worker_id) = action.target_worker_id.as_deref() else {
+                        applied.push(applied_action(action, false, "missing target worker"));
+                        continue;
+                    };
+                    let Some(prefix_hash) = action.prefix_hash.as_deref() else {
+                        applied.push(applied_action(action, false, "missing prefix hash"));
+                        continue;
+                    };
+                    let tier = action.tier.unwrap_or(CacheTier::Hbm);
+                    let cache_actions = control.replicate_prefix(
+                        source_worker_id,
+                        target_worker_id,
+                        prefix_hash,
+                        tier,
+                    );
+                    applied.push(applied_action(
+                        action,
+                        true,
+                        format!(
+                            "replicated hot prefix to {target_worker_id} ({}) cache actions",
+                            cache_actions.len()
+                        ),
+                    ));
+                }
+                _ => {}
             }
         }
 
@@ -1811,6 +1844,70 @@ mod tests {
             control.admit(&cold).unwrap(),
             AdmissionDecision::Admit(_)
         ));
+    }
+
+    #[test]
+    fn co_scheduler_replicate_action_updates_residency() {
+        let engine_a = EngineEndpoint {
+            id: "decode-a".to_string(),
+            kind: quillcache_core::EngineKind::Vllm,
+            role: quillcache_core::EngineRole::Aggregated,
+            base_url: "http://127.0.0.1:8000".to_string(),
+            model_id: "model".to_string(),
+            tokenizer_id: "tok".to_string(),
+            tenant_id: "tenant".to_string(),
+            locality_domain: "local".to_string(),
+        };
+        let engine_b = EngineEndpoint {
+            id: "decode-b".to_string(),
+            base_url: "http://127.0.0.1:8001".to_string(),
+            ..engine_a.clone()
+        };
+        let mut control = ControlPlane::new(vec![engine_a, engine_b]);
+        let block = KvBlockKey::new("model", "tok", "tenant", "root", "hot", 0, 64);
+        let request = RequestShape {
+            id: "r".to_string(),
+            model_id: "model".to_string(),
+            tokenizer_id: "tok".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant".to_string(),
+            session_id: None,
+            blocks: vec![block.clone()],
+            estimated_decode_tokens: 8,
+            slo: SloTarget::default(),
+        };
+        control.observe_placement("decode-a", &request, 1024);
+        let mut actuator = CoSchedulerActuator::new(Some(CoSchedulerConfig::default()));
+        let action = CoSchedulerAction {
+            epoch: 1,
+            kind: CoSchedulerActionKind::ReplicateHotPrefix,
+            target_worker_id: Some("decode-b".to_string()),
+            source_worker_id: Some("decode-a".to_string()),
+            prefix_hash: Some("root".to_string()),
+            tier: Some(CacheTier::Hbm),
+            value: None,
+            reason: "hot prefix".to_string(),
+        };
+
+        let applied = actuator.apply(
+            &CoSchedulerPlan {
+                epoch: 1,
+                dry_run: false,
+                actions: vec![action],
+            },
+            &mut control,
+        );
+
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].applied);
+        let holders = control
+            .residency()
+            .locate(&block)
+            .into_iter()
+            .map(|r| r.worker_id)
+            .collect::<Vec<_>>();
+        assert!(holders.contains(&"decode-a".to_string()));
+        assert!(holders.contains(&"decode-b".to_string()));
     }
 
     #[test]

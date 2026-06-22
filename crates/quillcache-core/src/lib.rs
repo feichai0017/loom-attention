@@ -901,6 +901,7 @@ pub enum DataPlaneActionKind {
     Hit,
     Promote,
     Demote,
+    Replicate,
     Evict,
     Remove,
 }
@@ -958,6 +959,20 @@ pub trait DataPlane: std::fmt::Debug + Send + Sync {
         worker_id: &str,
         block_hash: &str,
     ) -> DataPlaneUpdate;
+
+    /// Replicate every block whose `prefix_hash` is resident on `source_worker_id`
+    /// to `target_worker_id`. Backends with real bytes should copy them; metadata
+    /// only backends can return an empty update and let the control plane fall back
+    /// to index-level residency replication.
+    fn replicate_prefix(
+        &mut self,
+        _source_worker_id: &str,
+        _target_worker_id: &str,
+        _prefix_hash: &str,
+        _target_tier: CacheTier,
+    ) -> DataPlaneUpdate {
+        DataPlaneUpdate::default()
+    }
 
     fn clear_worker(&mut self, worker_id: &str) -> DataPlaneUpdate;
 

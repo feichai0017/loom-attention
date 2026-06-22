@@ -7,10 +7,10 @@ use crate::router::{
 };
 use crate::{
     BlockRemovedEvent, BlockStoredEvent, CacheResidency, CacheTier, CoSchedulerSnapshot,
-    CoSchedulerTelemetry, Conductor, CostModel, DataPlane, DataPlaneAction, DataPlaneUpdate,
-    EngineEndpoint, EngineRole, ExternalKvBlockKey, HotPrefixObservation, IdentityScope,
-    IndexBackend, KvBlockKey, KvCacheEvent, KvEvent, KvEventBatch, MemoryIndex, ModelContext,
-    NoDataPlane, RequestShape, ReuseViolation, TierObservation, WorkerState,
+    CoSchedulerTelemetry, Conductor, CostModel, DataPlane, DataPlaneAction, DataPlaneActionKind,
+    DataPlaneUpdate, EngineEndpoint, EngineRole, ExternalKvBlockKey, HotPrefixObservation,
+    IdentityScope, IndexBackend, KvBlockKey, KvCacheEvent, KvEvent, KvEventBatch, MemoryIndex,
+    ModelContext, NoDataPlane, RequestShape, ReuseViolation, TierObservation, WorkerState,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -797,6 +797,61 @@ impl ControlPlane {
         }
     }
 
+    /// Apply a co-scheduler hot-prefix replication action. A real data plane gets
+    /// the first chance to copy bytes; if it has no replication backend, copy the
+    /// residency metadata so routers can still spread requests safely by exact
+    /// `KvBlockKey` identity.
+    pub fn replicate_prefix(
+        &mut self,
+        source_worker_id: &str,
+        target_worker_id: &str,
+        prefix_hash: &str,
+        target_tier: CacheTier,
+    ) -> Vec<DataPlaneAction> {
+        let update = self.data_plane.replicate_prefix(
+            source_worker_id,
+            target_worker_id,
+            prefix_hash,
+            target_tier,
+        );
+        if !update.is_empty() {
+            return self.mirror_data_plane_update(update);
+        }
+
+        let source_residency = self
+            .residency
+            .snapshot()
+            .into_iter()
+            .filter(|entry| {
+                entry.worker_id == source_worker_id && entry.key.prefix_hash == prefix_hash
+            })
+            .collect::<Vec<_>>();
+        let mut actions = Vec::new();
+        for source in source_residency {
+            let mut replica = source.clone();
+            replica.worker_id = target_worker_id.to_string();
+            replica.tier = target_tier;
+            replica.ref_count = 0;
+            self.residency.put(replica.clone());
+            let bytes = replica.bytes;
+            actions.push(DataPlaneAction {
+                kind: DataPlaneActionKind::Replicate,
+                worker_id: target_worker_id.to_string(),
+                key: replica.key,
+                from_tier: Some(source.tier),
+                to_tier: Some(target_tier),
+                bytes,
+                estimated_us: self.cost_model.transfer_cost_us(
+                    source.tier,
+                    source.bytes,
+                    source_worker_id == target_worker_id,
+                    true,
+                ),
+            });
+        }
+        actions
+    }
+
     /// Decide which hot prefixes to replicate to spread cache hotspots: live
     /// access counts (the request path feeds the hotness tracker) crossed with
     /// where each hot prefix is resident (HBM) and current worker load. The cost
@@ -1245,6 +1300,52 @@ mod tests {
         let second = control.route(&request).unwrap();
         assert_eq!(second.worker_id, first.worker_id);
         assert_eq!(second.local_hits.len(), 1);
+    }
+
+    #[test]
+    fn replicate_prefix_copies_residency_to_target_worker() {
+        let mut control = ControlPlane::new(vec![
+            engine(),
+            EngineEndpoint {
+                id: "vllm-b".to_string(),
+                base_url: "http://127.0.0.1:8002".to_string(),
+                ..engine()
+            },
+        ]);
+        let block = KvBlockKey::external_hash(ExternalKvBlockKey {
+            model_id: "Qwen/Qwen3-0.6B".to_string(),
+            tokenizer_id: "Qwen/Qwen3-0.6B".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant-a".to_string(),
+            prefix_hash: "root".to_string(),
+            block_hash: "shared-prefix".to_string(),
+            block_index: 0,
+            token_count: 64,
+        });
+        let request = RequestShape {
+            id: "req-a".to_string(),
+            model_id: "Qwen/Qwen3-0.6B".to_string(),
+            tokenizer_id: "Qwen/Qwen3-0.6B".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant-a".to_string(),
+            session_id: None,
+            blocks: vec![block.clone()],
+            estimated_decode_tokens: 16,
+            slo: SloTarget::default(),
+        };
+        control.observe_placement("vllm-a", &request, 1024);
+
+        let actions = control.replicate_prefix("vllm-a", "vllm-b", "root", CacheTier::Hbm);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, DataPlaneActionKind::Replicate);
+        let holders = control
+            .residency()
+            .locate(&block)
+            .into_iter()
+            .map(|r| r.worker_id)
+            .collect::<Vec<_>>();
+        assert!(holders.contains(&"vllm-a".to_string()));
+        assert!(holders.contains(&"vllm-b".to_string()));
     }
 
     #[test]
