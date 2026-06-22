@@ -345,6 +345,21 @@ impl ControlPlane {
         self
     }
 
+    /// Runtime admission actuator: enable overload rejection without rebuilding the
+    /// control plane.
+    pub fn set_admission_slo_limit(&mut self, max_violation_us: u64) {
+        self.max_slo_violation_us = Some(max_violation_us);
+    }
+
+    /// Runtime admission actuator: disable overload rejection when pressure clears.
+    pub fn clear_admission_slo_limit(&mut self) {
+        self.max_slo_violation_us = None;
+    }
+
+    pub fn admission_slo_limit(&self) -> Option<u64> {
+        self.max_slo_violation_us
+    }
+
     /// Plan the request, then either admit it or **reject it early** if even the
     /// best worker would violate the SLO past the configured limit (overload).
     /// With no limit set, always admits.

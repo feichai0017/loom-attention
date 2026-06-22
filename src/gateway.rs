@@ -6,8 +6,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use quillcache_core::{
-    CacheObservation, CoScheduler, CoSchedulerTelemetry, ControlPlane, IngestSummary, PlanAction,
-    PlanActionKind, RequestPlan, ServingMode, SloObservation, TransferObservation,
+    AdmissionDecision, CacheObservation, CoScheduler, CoSchedulerAction, CoSchedulerActionKind,
+    CoSchedulerPlan, CoSchedulerSnapshot, CoSchedulerTelemetry, ControlPlane, IngestSummary,
+    PlanAction, PlanActionKind, RequestPlan, ServingMode, SloObservation, TransferObservation,
 };
 use quillcache_core::{
     DataPlane, DataPlaneAction, EngineEndpoint, ExternalKvBlockKey, IndexBackend, KvBlockKey,
@@ -94,6 +95,11 @@ pub struct GatewayConfig {
     /// residency-snapshot router. Off by default.
     #[serde(default)]
     pub conductor: Option<bool>,
+    /// Cluster co-scheduler actuator settings. The observation plane is always
+    /// exposed in `/v1/state`; `apply=true` lets gateway-local actions mutate
+    /// runtime state.
+    #[serde(default)]
+    pub co_scheduler: Option<CoSchedulerConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +128,33 @@ pub struct ActionSinkConfig {
     pub fail_open: bool,
     #[serde(default = "default_action_sink_timeout_ms")]
     pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoSchedulerConfig {
+    #[serde(default = "default_co_scheduler_apply")]
+    pub apply: bool,
+    /// Violation budget used when an `AdmissionReject` action enables gateway
+    /// admission control. `0` means reject any request predicted to miss SLO.
+    #[serde(default = "default_admission_slo_violation_limit_us")]
+    pub admission_slo_violation_limit_us: u64,
+}
+
+impl Default for CoSchedulerConfig {
+    fn default() -> Self {
+        Self {
+            apply: default_co_scheduler_apply(),
+            admission_slo_violation_limit_us: default_admission_slo_violation_limit_us(),
+        }
+    }
+}
+
+fn default_co_scheduler_apply() -> bool {
+    true
+}
+
+fn default_admission_slo_violation_limit_us() -> u64 {
+    0
 }
 
 fn default_action_sink_kind() -> String {
@@ -444,6 +477,117 @@ pub struct TransferTelemetrySummary {
     pub bandwidth_mbps: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedCoSchedulerAction {
+    pub epoch: u64,
+    pub kind: CoSchedulerActionKind,
+    pub applied: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoSchedulerActuatorSnapshot {
+    pub apply: bool,
+    pub last_applied_epoch: u64,
+    pub admission_reject_enabled: bool,
+    pub admission_slo_violation_limit_us: Option<u64>,
+    pub last_applied_actions: Vec<AppliedCoSchedulerAction>,
+}
+
+#[derive(Debug)]
+struct CoSchedulerActuator {
+    config: CoSchedulerConfig,
+    last_applied_epoch: u64,
+    admission_reject_enabled: bool,
+    last_applied_actions: Vec<AppliedCoSchedulerAction>,
+}
+
+impl CoSchedulerActuator {
+    fn new(config: Option<CoSchedulerConfig>) -> Self {
+        Self {
+            config: config.unwrap_or_default(),
+            last_applied_epoch: 0,
+            admission_reject_enabled: false,
+            last_applied_actions: Vec::new(),
+        }
+    }
+
+    fn plan_dry_run(&self) -> bool {
+        !self.config.apply
+    }
+
+    fn apply(
+        &mut self,
+        plan: &CoSchedulerPlan,
+        control: &mut ControlPlane,
+    ) -> Vec<AppliedCoSchedulerAction> {
+        if !self.config.apply || plan.epoch <= self.last_applied_epoch {
+            return Vec::new();
+        }
+
+        let mut applied = Vec::new();
+        let mut saw_admission_reject = false;
+        for action in &plan.actions {
+            if action.kind == CoSchedulerActionKind::AdmissionReject {
+                saw_admission_reject = true;
+                control.set_admission_slo_limit(self.config.admission_slo_violation_limit_us);
+                self.admission_reject_enabled = true;
+                applied.push(applied_action(
+                    action,
+                    true,
+                    "enabled gateway admission rejection",
+                ));
+            }
+        }
+
+        if !saw_admission_reject && self.admission_reject_enabled {
+            control.clear_admission_slo_limit();
+            self.admission_reject_enabled = false;
+            applied.push(AppliedCoSchedulerAction {
+                epoch: plan.epoch,
+                kind: CoSchedulerActionKind::AdmissionReject,
+                applied: true,
+                reason: "disabled gateway admission rejection; pressure cleared".to_string(),
+            });
+        }
+
+        self.last_applied_epoch = plan.epoch;
+        self.last_applied_actions = applied.clone();
+        applied
+    }
+
+    fn snapshot(&self, control: &ControlPlane) -> CoSchedulerActuatorSnapshot {
+        CoSchedulerActuatorSnapshot {
+            apply: self.config.apply,
+            last_applied_epoch: self.last_applied_epoch,
+            admission_reject_enabled: self.admission_reject_enabled,
+            admission_slo_violation_limit_us: control.admission_slo_limit(),
+            last_applied_actions: self.last_applied_actions.clone(),
+        }
+    }
+}
+
+fn applied_action(
+    action: &CoSchedulerAction,
+    applied: bool,
+    reason: impl Into<String>,
+) -> AppliedCoSchedulerAction {
+    AppliedCoSchedulerAction {
+        epoch: action.epoch,
+        kind: action.kind,
+        applied,
+        reason: reason.into(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoSchedulerRuntimeState {
+    pub snapshot: CoSchedulerSnapshot,
+    pub plan: CoSchedulerPlan,
+    pub applied_actions: Vec<AppliedCoSchedulerAction>,
+    pub actuator: CoSchedulerActuatorSnapshot,
+}
+
 #[derive(Debug, Clone)]
 struct GatewayState {
     control: Arc<RwLock<ControlPlane>>,
@@ -453,6 +597,7 @@ struct GatewayState {
     metrics: Arc<GatewayMetrics>,
     co_scheduler: Arc<CoScheduler>,
     co_scheduler_epoch: Arc<AtomicU64>,
+    co_scheduler_actuator: Arc<RwLock<CoSchedulerActuator>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -673,6 +818,9 @@ pub async fn run(config: GatewayConfig) -> Result<(), GatewayError> {
         metrics: Arc::new(GatewayMetrics::default()),
         co_scheduler: Arc::new(CoScheduler::default()),
         co_scheduler_epoch: Arc::new(AtomicU64::new(0)),
+        co_scheduler_actuator: Arc::new(RwLock::new(CoSchedulerActuator::new(
+            config.co_scheduler.clone(),
+        ))),
     };
     let control = state.control.clone();
     let app = router(state);
@@ -956,26 +1104,8 @@ async fn metrics_endpoint(State(state): State<GatewayState>) -> impl IntoRespons
 }
 
 async fn state_snapshot(State(state): State<GatewayState>) -> impl IntoResponse {
+    let co_scheduler_runtime = run_co_scheduler_cycle(&state).await;
     let control = state.control.read().await;
-    let epoch = state
-        .co_scheduler_epoch
-        .fetch_add(1, Ordering::Relaxed)
-        .saturating_add(1);
-    let hotness_threshold = state
-        .co_scheduler
-        .policy
-        .min_hot_prefix_hits
-        .min(u64::from(u32::MAX)) as u32;
-    let co_scheduler_snapshot = control.co_scheduler_snapshot(
-        epoch,
-        CoSchedulerTelemetry {
-            slo: state.slo.observation(),
-            cache: state.metrics.observation(),
-            transfer: state.metrics.transfer_observation(),
-        },
-        hotness_threshold,
-    );
-    let co_scheduler_plan = state.co_scheduler.dry_run(&co_scheduler_snapshot);
     Json(json!({
         "engines": control.engines(),
         "workers": control.workers(),
@@ -989,12 +1119,49 @@ async fn state_snapshot(State(state): State<GatewayState>) -> impl IntoResponse 
         "transfer_telemetry": state.metrics.transfer_summary(),
         "co_scheduler": {
             "policy": state.co_scheduler.policy,
-            "snapshot": co_scheduler_snapshot,
-            "dry_run_plan": co_scheduler_plan,
+            "snapshot": co_scheduler_runtime.snapshot,
+            "active_plan": co_scheduler_runtime.plan,
+            "applied_actions": co_scheduler_runtime.applied_actions,
+            "actuator": co_scheduler_runtime.actuator,
         },
         "resident_blocks": control.residency().len(),
         "residency": control.residency().snapshot(),
     }))
+}
+
+async fn run_co_scheduler_cycle(state: &GatewayState) -> CoSchedulerRuntimeState {
+    let mut control = state.control.write().await;
+    let epoch = state
+        .co_scheduler_epoch
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    let hotness_threshold = state
+        .co_scheduler
+        .policy
+        .min_hot_prefix_hits
+        .min(u64::from(u32::MAX)) as u32;
+    let snapshot = control.co_scheduler_snapshot(
+        epoch,
+        CoSchedulerTelemetry {
+            slo: state.slo.observation(),
+            cache: state.metrics.observation(),
+            transfer: state.metrics.transfer_observation(),
+        },
+        hotness_threshold,
+    );
+    let dry_run = state.co_scheduler_actuator.read().await.plan_dry_run();
+    let plan = state.co_scheduler.plan(&snapshot, dry_run);
+    let applied_actions = {
+        let mut actuator = state.co_scheduler_actuator.write().await;
+        actuator.apply(&plan, &mut control)
+    };
+    let actuator = state.co_scheduler_actuator.read().await.snapshot(&control);
+    CoSchedulerRuntimeState {
+        snapshot,
+        plan,
+        applied_actions,
+        actuator,
+    }
 }
 
 async fn ingest_kv_events(
@@ -1042,10 +1209,22 @@ async fn proxy_openai_path(
     let request_shape = request_shape_from_payload(&mut payload);
     let ttft_budget_ms = request_shape.slo.ttft_ms;
     let clean_body = serde_json::to_vec(&payload)?;
+    let _co_scheduler_runtime = run_co_scheduler_cycle(&state).await;
 
     let (engine, trace, action_plan) = {
         let control = state.control.read().await;
-        let plan = control.plan(&request_shape)?;
+        let plan = match control.admit(&request_shape)? {
+            AdmissionDecision::Admit(plan) => *plan,
+            AdmissionDecision::Reject {
+                reason,
+                best_slo_violation_us,
+            } => {
+                return Err(GatewayHttpError::AdmissionRejected {
+                    reason,
+                    best_slo_violation_us,
+                });
+            }
+        };
         let decision = &plan.route;
         let transfer_costs = transfer_cost_summary(&plan);
         // Identity guard: how many content-matching blocks we refused to reuse
@@ -1447,6 +1626,13 @@ enum GatewayHttpError {
     Control(#[from] quillcache_core::ControlError),
     #[error("routed to unknown engine: {0}")]
     MissingEngine(String),
+    #[error(
+        "request rejected by QuillCache admission control: {reason} (best_slo_violation_us={best_slo_violation_us})"
+    )]
+    AdmissionRejected {
+        reason: String,
+        best_slo_violation_us: u64,
+    },
     #[error("upstream request failed: {0}")]
     Upstream(#[from] reqwest::Error),
     #[error("action sink delivery failed: {0}")]
@@ -1460,6 +1646,7 @@ impl IntoResponse for GatewayHttpError {
         let message = self.to_string();
         let status = match self {
             Self::Json(_) => StatusCode::BAD_REQUEST,
+            Self::AdmissionRejected { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::MissingEngine(_) => StatusCode::BAD_GATEWAY,
             Self::Control(_) | Self::Upstream(_) | Self::ActionSink(_) | Self::BuildResponse(_) => {
                 StatusCode::BAD_GATEWAY
@@ -1510,6 +1697,7 @@ mod tests {
             data_plane: None,
             action_sink: None,
             conductor: None,
+            co_scheduler: None,
         };
         // No backend configured -> in-memory reference.
         assert_eq!(build_index(&base).name(), "memory");
@@ -1552,6 +1740,77 @@ mod tests {
         assert_eq!(snapshot.kind, "http");
         assert!(!snapshot.fail_open);
         assert_eq!(snapshot.timeout_ms, 500);
+    }
+
+    #[test]
+    fn co_scheduler_admission_action_controls_gateway_admission() {
+        let engine = EngineEndpoint {
+            id: "decode-a".to_string(),
+            kind: quillcache_core::EngineKind::Vllm,
+            role: quillcache_core::EngineRole::Aggregated,
+            base_url: "http://127.0.0.1:8000".to_string(),
+            model_id: "model".to_string(),
+            tokenizer_id: "tok".to_string(),
+            tenant_id: "tenant".to_string(),
+            locality_domain: "local".to_string(),
+        };
+        let mut control = ControlPlane::new(vec![engine]);
+        let mut actuator = CoSchedulerActuator::new(Some(CoSchedulerConfig {
+            apply: true,
+            admission_slo_violation_limit_us: 0,
+        }));
+        let action = CoSchedulerAction {
+            epoch: 1,
+            kind: CoSchedulerActionKind::AdmissionReject,
+            target_worker_id: None,
+            source_worker_id: None,
+            prefix_hash: None,
+            tier: None,
+            value: Some("enable_overload_rejection".to_string()),
+            reason: "test overload".to_string(),
+        };
+        let plan = CoSchedulerPlan {
+            epoch: 1,
+            dry_run: false,
+            actions: vec![action],
+        };
+
+        let applied = actuator.apply(&plan, &mut control);
+        assert_eq!(applied.len(), 1);
+        assert_eq!(control.admission_slo_limit(), Some(0));
+
+        let cold = RequestShape {
+            id: "r".to_string(),
+            model_id: "model".to_string(),
+            tokenizer_id: "tok".to_string(),
+            adapter_id: None,
+            tenant_id: "tenant".to_string(),
+            session_id: None,
+            blocks: vec![KvBlockKey::new(
+                "model", "tok", "tenant", "root", "cold", 0, 64,
+            )],
+            estimated_decode_tokens: 8,
+            slo: SloTarget {
+                ttft_ms: 0,
+                tpot_ms: 0,
+            },
+        };
+        assert!(matches!(
+            control.admit(&cold).unwrap(),
+            AdmissionDecision::Reject { .. }
+        ));
+
+        let clear = CoSchedulerPlan {
+            epoch: 2,
+            dry_run: false,
+            actions: vec![],
+        };
+        actuator.apply(&clear, &mut control);
+        assert_eq!(control.admission_slo_limit(), None);
+        assert!(matches!(
+            control.admit(&cold).unwrap(),
+            AdmissionDecision::Admit(_)
+        ));
     }
 
     #[test]
