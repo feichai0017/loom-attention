@@ -1,4 +1,4 @@
-"""Engine adapters for Loom."""
+"""Engine integration and distributed-attention utilities for Loom."""
 
 from .local_delegate import LocalForwardObserver, TensorContractError
 from .step_metadata import (

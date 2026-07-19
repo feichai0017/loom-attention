@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "loom-attention-engine"
 version = "2.0.0a1"
-description = "vLLM and SGLang adapters for the Loom attention runtime"
+description = "Python integration and data-path tools for the Loom attention runtime"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = []
