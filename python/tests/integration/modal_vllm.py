@@ -22,9 +22,7 @@ DEFAULT_MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct"
 DEFAULT_REVISION = "83212e1e2b3cfd6958f3707877bb878945dea8ee"
 
 image = (
-    modal.Image.from_registry(
-        "vllm/vllm-openai:v0.25.0", add_python="3.12"
-    )
+    modal.Image.from_registry("vllm/vllm-openai:v0.25.0", add_python="3.12")
     .entrypoint([])
     .env(
         {
@@ -37,9 +35,7 @@ image = (
     .add_local_dir(LOCAL_PYTHON, remote_path=str(REMOTE_ROOT / "python"))
 )
 
-model_cache = modal.Volume.from_name(
-    "loom-huggingface-cache", create_if_missing=True
-)
+model_cache = modal.Volume.from_name("loom-huggingface-cache", create_if_missing=True)
 app = modal.App("loom-vllm-gate")
 
 
@@ -181,10 +177,14 @@ def main(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     telemetry = result["custom"]["loom_telemetry"]
+    binding = result["custom"]["loom_binding_telemetry"]
     print(f"report={output}")
     print(f"passed={result['passed']}")
     print(f"forward_calls={telemetry['forward_calls']}")
     print(f"max_step_generation={telemetry['max_step_generation']}")
+    print(f"binding_steps={binding['metadata_steps']}")
+    print(f"physical_block_ids={binding['unique_block_ids_seen']}")
+    print("validated_binding_forwards=" f"{binding['validated_attention_forwards']}")
 
 
 if __name__ == "__main__":

@@ -24,8 +24,8 @@ merge combines its attention state with the remote sealed-prefix state.
 | Area | Implemented | Missing evidence or integration |
 | --- | --- | --- |
 | Rust runtime | `KvPool`, Holt catalog, planner, leases, generation-pinned `KvView`, transport handles | production pool and device transport adapters |
-| vLLM | local `CUSTOM` delegate, metadata observer, and real-model Modal L4 report | physical block to `PoolObjectRef` mapping |
-| Attention state | Rust reference, contiguous PyTorch/FlashInfer paths, and generation-pinned FlashInfer paged executor | external engine/pool page-table binding |
+| vLLM | local `CUSTOM` delegate, metadata observer, physical-block `KVConnector` bridge, and real-model Modal L4 reports | pool lookup/load and physical block to `PoolObjectRef` mapping |
+| Attention state | Rust reference, contiguous PyTorch/FlashInfer paths, and generation-pinned FlashInfer paged executor | external-pool objects installed into the engine page table |
 | One-node data path | NCCL Route-Q and Stage-KV harness with contiguous and paged modes; phase-instrumented Modal L4 prefix sweep | Nsight attribution and topology-comparable bare-metal sweep |
 | Cross-node data path | contracts only | NIXL/UCX/GPUDirect RDMA implementation and measurements |
 
@@ -33,7 +33,8 @@ The installable Python package lives under `python/src/loom_attention`, while
 tests live under `python/tests`. Reusable attention-state kernels stay in the
 core package. CUDA smoke tests and benchmark orchestration live under
 `python/tests/integration` and are excluded from the wheel. Engine integration
-remains in the `vllm_plugin`, `local_delegate`, and `step_metadata` modules.
+remains in the `vllm_plugin`, `vllm_connector`, `vllm_binding`,
+`block_binding`, `local_delegate`, and `step_metadata` modules.
 
 ## M1 Engine-Local Baseline
 
@@ -64,6 +65,38 @@ the native process paid cold download/initialization first. The adapter still
 does not map vLLM physical block IDs to external `PoolObjectRef` values or
 install the snapshot in the Rust runtime. Remote attention and split-KV
 execution begin at M2.
+
+## M1b Physical-Block Bridge
+
+vLLM does not retain a complete CPU mirror of its GPU attention block table.
+Reading that table in `AttentionImpl.forward` would add a device-to-host
+synchronization to every layer. Loom therefore uses vLLM's official
+`KVConnector` lifecycle instead: scheduler output carries CPU physical block
+allocations, and `register_kv_caches` provides the worker's actual per-layer
+CUDA cache tensors.
+
+`BlockBindingRegistry` mirrors new-request replacement, running-request append,
+preemption/resume replacement, completion, and physical-slot reuse. Every step
+advances a generation. A worker activates that generation while connector
+metadata is bound; each CUSTOM attention forward validates it before entering
+the native kernel. External bindings require an exact object generation,
+matching layout digest, and unexpired read lease. Allocation updates invalidate
+older bindings for reused physical slots without reading the GPU table.
+
+The metadata-only connector returns zero external matches and performs no data
+movement. CPU CI covers its state transitions, tensor registration, no-device-
+readback rule, stale generation checks, lease checks, and same-step forward
+validation.
+
+The July 20 connector run passed on the same L4/vLLM 0.25.0/Torch 2.11.0+cu130
+environment. It preserved exact token IDs and a 0.0 maximum logprob delta while
+registering 30 real CUDA KV cache tensors, consuming 36 scheduler metadata
+steps and eight request block updates, observing four physical block IDs, and
+validating 960 attention forwards against an active binding generation. The
+remaining initialization/profile forwards intentionally had no request binding.
+The complete report is
+[modal-vllm-l4-binding-2026-07-20.json](results/modal-vllm-l4-binding-2026-07-20.json).
+Mooncake lookup, transfer, and `PoolObjectRef` installation remain M3 work.
 
 ## M2a Two-GPU Data-Path Gate
 

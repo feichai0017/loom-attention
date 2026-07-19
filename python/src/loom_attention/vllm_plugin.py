@@ -12,6 +12,7 @@ import os
 from dataclasses import asdict
 from typing import Any
 
+from .block_binding import has_active_binding_step, validate_active_binding_step
 from .local_delegate import LocalForwardObserver
 from .step_metadata import StepMetadataObserver, StepMetadataSnapshot
 
@@ -24,9 +25,7 @@ _STEP_OBSERVERS: list[StepMetadataObserver] = []
 def telemetry_snapshot() -> dict[str, Any]:
     """Summarize process-local proof that the custom backend executed."""
     forward = [asdict(observer.snapshot()) for observer in _FORWARD_OBSERVERS]
-    step_generations = [
-        observer.latest_generation for observer in _STEP_OBSERVERS
-    ]
+    step_generations = [observer.latest_generation for observer in _STEP_OBSERVERS]
     return {
         "implementation_count": len(forward),
         "metadata_builder_count": len(step_generations),
@@ -51,8 +50,7 @@ def register() -> None:
     delegate = os.environ.get("LOOM_VLLM_DELEGATE", "flash_attn")
     if delegate != "flash_attn":
         raise RuntimeError(
-            "M1 supports only LOOM_VLLM_DELEGATE=flash_attn; "
-            f"got {delegate!r}"
+            "M1 supports only LOOM_VLLM_DELEGATE=flash_attn; " f"got {delegate!r}"
         )
 
     try:
@@ -74,9 +72,7 @@ def register() -> None:
     class _LoomFlashAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self._loom_step_observer = _step_observer_from_builder(
-                self, args, kwargs
-            )
+            self._loom_step_observer = _step_observer_from_builder(self, args, kwargs)
             _STEP_OBSERVERS.append(self._loom_step_observer)
 
         @property
@@ -144,6 +140,13 @@ def register() -> None:
             output_scale: Any = None,
             output_block_scale: Any = None,
         ) -> Any:
+            if has_active_binding_step():
+                step_snapshot = getattr(attn_metadata, _STEP_SNAPSHOT_ATTRIBUTE, None)
+                if not isinstance(step_snapshot, StepMetadataSnapshot):
+                    raise RuntimeError(
+                        "active Loom binding has no matching step snapshot"
+                    )
+                validate_active_binding_step(request_count=step_snapshot.request_count)
             token = self._loom_observer.before_forward(
                 query=query,
                 key=key,
@@ -190,16 +193,12 @@ def register() -> None:
     _LoomFlashAttentionImpl.__module__ = __name__
     LoomFlashAttentionImpl = _LoomFlashAttentionImpl
 
-    _LoomFlashAttentionMetadataBuilder.__name__ = (
-        "LoomFlashAttentionMetadataBuilder"
-    )
+    _LoomFlashAttentionMetadataBuilder.__name__ = "LoomFlashAttentionMetadataBuilder"
     _LoomFlashAttentionMetadataBuilder.__qualname__ = (
         "LoomFlashAttentionMetadataBuilder"
     )
     _LoomFlashAttentionMetadataBuilder.__module__ = __name__
-    LoomFlashAttentionMetadataBuilder = (
-        _LoomFlashAttentionMetadataBuilder
-    )
+    LoomFlashAttentionMetadataBuilder = _LoomFlashAttentionMetadataBuilder
 
     _LoomFlashAttentionBackend.__name__ = "LoomFlashAttentionBackend"
     _LoomFlashAttentionBackend.__qualname__ = "LoomFlashAttentionBackend"

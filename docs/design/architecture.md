@@ -84,6 +84,21 @@ to the table identity and generation. Updating any page-table tensor in place
 without advancing the generation violates the contract. The executor never
 persists device pointers and never reads page-table values back to the host.
 
+For vLLM 0.25, the physical-block bridge uses the official `KVConnector` seam.
+The scheduler sends new, appended, and resumed request block allocations as
+CPU metadata. The worker registers its real per-layer paged-KV tensors once and
+applies each allocation update to a generation-checked `BlockBindingRegistry`.
+The CUSTOM attention forward validates that the same binding generation is
+active before delegating to vLLM FlashAttention. It never reads the GPU block
+table back to the host.
+
+The current connector is metadata-only. It claims zero external cache hits and
+performs no load or save. A pool adapter must later add exact
+`PoolObjectRef + read lease -> destination physical block` assignments to the
+same step metadata, then copy or register those objects before attention.
+Physical-slot reassignment conservatively invalidates any older external
+binding before that slot can be reused.
+
 Combining current-token KV append with attention preserves ordering without a
 second remote synchronization. A worker may publish a newly sealed block after
 the operation, but the external pool remains authoritative for its lifetime.

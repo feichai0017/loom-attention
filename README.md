@@ -32,11 +32,13 @@ never synchronously queries the global controller or Holt.
 ## Current Status
 
 The Rust lifecycle contracts, Holt catalog, planner, real-model vLLM
-observer/delegate, output-plus-LSE merge, NCCL Route-Q harness, and
-generation-pinned FlashInfer paged-KV executor are implemented and covered by
-tests. Modal L4 reports for the vLLM adapter and the phase-instrumented 4K-32K
-two-GPU sweep are recorded under `docs/results`. The physical vLLM block bridge,
-Mooncake adapter, cross-node transport, Nsight-level attribution, and broader
+observer/delegate, node-local physical-block binding registry, output-plus-LSE
+merge, NCCL Route-Q harness, and generation-pinned FlashInfer paged-KV executor
+are implemented and covered by tests. Modal L4 reports for the vLLM adapter and
+physical-block bridge, plus the phase-instrumented 4K-32K two-GPU sweep, are
+recorded under `docs/results`.
+Binding external `PoolObjectRef` values to those vLLM slots, the Mooncake
+load/save adapter, cross-node transport, Nsight-level attribution, and broader
 hardware evaluation are not implemented yet. See the
 [implementation status](docs/status.md) for exact boundaries.
 

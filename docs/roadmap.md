@@ -33,8 +33,9 @@ Exit: `cargo test --workspace` validates ownership and state-machine invariants.
 
 ### M1: Engine-Local Backend
 
-Status: real-model local delegate acceptance complete on Modal L4; physical
-block-to-pool binding remains open.
+Status: real-model local delegate acceptance complete on Modal L4; the
+metadata-only physical-block bridge is implemented and external pool binding
+remains open.
 
 - add a vLLM `AttentionBackend` adapter;
 - delegate to the existing local kernel;
@@ -45,6 +46,11 @@ block-to-pool binding remains open.
 
 Local acceptance exit: complete. One real model decodes through the adapter with
 no remote execution and exact native-output equality.
+
+Physical bridge exit: complete on Modal L4. vLLM scheduler allocation metadata
+reaches a generation-checked worker registry, real paged-KV tensors are
+registered, and each request-bearing CUSTOM forward validates the active
+binding generation without device-to-host table readback.
 
 Integration exit: vLLM physical block IDs resolve to lease-covered
 `PoolObjectRef` generations without device-to-host table readback.

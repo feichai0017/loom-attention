@@ -5,7 +5,7 @@ from integration.vllm_smoke import _compare_run_payloads
 
 def run_payload(*, backend: str, tokens=None, logprobs=None):
     return {
-        "schema": 1,
+        "schema": 2,
         "backend": backend,
         "model": "model",
         "revision": "revision",
@@ -24,6 +24,20 @@ def run_payload(*, backend: str, tokens=None, logprobs=None):
                 "step_generations": [2],
                 "max_step_generation": 2,
                 "implementations": [],
+            }
+            if backend == "CUSTOM"
+            else None
+        ),
+        "loom_binding_telemetry": (
+            {
+                "registry_count": 1,
+                "metadata_steps": 4,
+                "request_updates": 2,
+                "registered_cache_tensor_count": 30,
+                "unique_block_ids_seen": 4,
+                "validated_attention_forwards": 4,
+                "external_binding_count": 0,
+                "registries": [],
             }
             if backend == "CUSTOM"
             else None
@@ -92,6 +106,19 @@ class VllmSmokeComparisonTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertIn(
             "custom report has no Loom execution telemetry",
+            report["differences"],
+        )
+
+    def test_rejects_custom_report_without_block_binding_telemetry(self) -> None:
+        native = run_payload(backend="FLASH_ATTN")
+        custom = run_payload(backend="CUSTOM")
+        custom["loom_binding_telemetry"] = None
+
+        report = _compare_run_payloads(native, custom, logprob_atol=1e-5)
+
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "custom report has no Loom block-binding telemetry",
             report["differences"],
         )
 

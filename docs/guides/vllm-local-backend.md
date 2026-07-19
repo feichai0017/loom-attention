@@ -9,11 +9,17 @@ delegates to vLLM `FlashAttentionImpl` with the same arguments and output tensor
 
 ```text
 vLLM model runner
+  -> LoomMetadataConnector.register_kv_caches
+       -> real per-layer paged-KV tensors
+  -> scheduler allocation metadata
+       -> replace / append / resume / finish / slot-reuse events
+       -> generation-checked BlockBindingRegistry
   -> LoomFlashAttentionMetadataBuilder.build
        -> CPU query boundary validation
        -> opaque paged-KV tensor descriptors
        -> generation-checked step snapshot
   -> LoomFlashAttentionImpl.forward
+       -> active block-binding generation validation
        -> first-call Q/K/V/output layout and device validation
        -> process-local timing and failure accounting
        -> vLLM FlashAttentionImpl.forward
@@ -25,6 +31,11 @@ the adapter are `query_start_loc_cpu`, which vLLM already maintains on CPU.
 Device-side block tables, slot mappings, sequence lengths, and query offsets
 remain opaque. The adapter adds the engine boundary that later route-Q and
 split-KV executors will implement.
+
+The smoke gate also configures `LoomMetadataConnector` through vLLM's external
+`KVConnector` module path. This connector observes allocation metadata and
+registers CUDA cache tensors, but reports zero external matches and performs no
+KV transfer.
 
 ## Install And Run
 
@@ -51,6 +62,14 @@ Run the isolated native-versus-CUSTOM gate on one Modal L4 with:
 
 ```bash
 uvx --from modal modal run python/tests/integration/modal_vllm.py \
+  --report build/modal/vllm-l4.json
+```
+
+On networks that proxy HTTP/2 or gRPC, install Modal's proxy extra:
+
+```bash
+uvx --from 'modal[api-proxy-support]' modal run \
+  python/tests/integration/modal_vllm.py \
   --report build/modal/vllm-l4.json
 ```
 
@@ -92,16 +111,36 @@ contains:
 - a monotonically increasing generation, including `update_block_table` calls.
 
 The snapshot deliberately does not contain physical block-table values. Reading
-those values in Python would synchronize the GPU. Prefix identity and
-`PoolObjectRef` mappings come from Loom's page table and pool events; a
-later node-local bridge will join those control-plane identities with these
-device tensor descriptors.
+those values in Python would synchronize the GPU. Instead, the node-local
+`KVConnector` receives physical IDs from scheduler CPU metadata and joins them
+with the registered cache tensors in `BlockBindingRegistry`. Prefix identity
+and `PoolObjectRef` mappings still come from Loom's page table and pool events.
+
+## Physical-Block Binding Contract
+
+For each engine step, the connector carries ordered scheduled request IDs,
+new-request replacement tables, running-request block appends, resumed-request
+replacement tables, finished requests, and explicit reuse notifications when
+available. The worker applies those updates before model forward and activates
+the resulting registry generation.
+
+Every CUSTOM attention call checks that the generation remains current, the KV
+cache tensors are registered, and the scheduled request set fits the attention
+metadata. Allocation updates conservatively invalidate an older external
+binding for any physical slot they mention. This protects correctness when a
+vLLM block ID is recycled even if cache-zero notifications are disabled.
+
+The registry can bind a physical slot only when the external object generation,
+local layout digest, pool ID, exact lease object set, and lease expiration all
+match. Raw device addresses stay process-local and are omitted from telemetry.
+The current connector does not yet receive pool matches or execute those loads.
 
 ## Current Validation Boundary
 
 CI tests registration, forwarding, metadata building, block-table replacement,
 zero device readback, layout rejection, error propagation, execution telemetry,
-and plugin idempotence with fake tensor and vLLM modules. The Modal gate adds a
+plugin idempotence, allocation mirroring, block reuse, lease validation, and the
+connector lifecycle with fake tensor and vLLM modules. The Modal gate adds a
 real CUDA/model acceptance layer but remains outside normal CPU-only CI.
 
 ## CUDA Acceptance Gate
@@ -150,6 +189,17 @@ the native process ran first and paid model download and cold initialization,
 while the CUSTOM process reused the container and model cache. This gate proves
 real model compatibility, metadata capture, delegation, and output equality.
 
-Physical vLLM block IDs still need to be joined with external `PoolObjectRef`
-values and installed as lease-covered, generation-pinned views in the node
-runtime. No remote attention occurs in this M1 gate.
+A second July 20 run enabled the metadata-only connector. It again produced
+identical token IDs and a 0.0 maximum logprob delta, while registering 30 real
+CUDA KV cache tensors, consuming 36 scheduler steps and eight block updates,
+observing four physical block IDs, and validating 960 request-bearing attention
+forwards against the active binding generation. Initialization/profile forwards
+run before request metadata exists and correctly bypass this check. The complete
+report is
+[modal-vllm-l4-binding-2026-07-20.json](../results/modal-vllm-l4-binding-2026-07-20.json).
+
+The metadata-only bridge now joins scheduler-provided physical vLLM block IDs
+with the worker's real paged-KV tensors. Physical IDs still need external
+`PoolObjectRef` values, and those objects must be loaded or registered under a
+covering lease before remote attention can run. No remote attention occurs in
+this M1 gate.

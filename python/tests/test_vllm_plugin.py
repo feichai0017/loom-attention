@@ -76,7 +76,9 @@ class VllmPluginTest(unittest.TestCase):
         ):
             vllm_plugin.__dict__.pop(name, None)
 
-    def fake_modules(self, registrations: list[tuple[object, str]]) -> dict[str, ModuleType]:
+    def fake_modules(
+        self, registrations: list[tuple[object, str]]
+    ) -> dict[str, ModuleType]:
         packages = {
             name: ModuleType(name)
             for name in (
@@ -126,15 +128,20 @@ class VllmPluginTest(unittest.TestCase):
                 address=0x100,
                 values=[0, 1, 3],
             ),
-            query_start_loc=FakeTensor(
-                (3,), dtype="torch.int32", address=0x200
-            ),
+            query_start_loc=FakeTensor((3,), dtype="torch.int32", address=0x200),
             seq_lens=FakeTensor((2,), dtype="torch.int32", address=0x300),
-            block_table_tensor=FakeTensor(
-                (2, 4), dtype="torch.int32", address=0x400
-            ),
+            block_table_tensor=FakeTensor((2, 4), dtype="torch.int32", address=0x400),
             slot_mapping=FakeTensor((3,), dtype="torch.int64", address=0x500),
         )
+
+    def attention_metadata(self):
+        builder = vllm_plugin.LoomFlashAttentionBackend.get_builder_cls()(
+            SimpleNamespace(block_size=16, dtype="torch.bfloat16"),
+            ["model.layers.0.self_attn"],
+            SimpleNamespace(),
+            "cuda:0",
+        )
+        return builder.build(0, self.common_metadata())
 
     def test_registers_custom_backend_and_delegates_unchanged_output(self) -> None:
         registrations = []
@@ -148,9 +155,7 @@ class VllmPluginTest(unittest.TestCase):
             registrations[0][1],
             "loom_attention.vllm_plugin.LoomFlashAttentionBackend",
         )
-        self.assertEqual(
-            vllm_plugin.LoomFlashAttentionBackend.get_name(), "CUSTOM"
-        )
+        self.assertEqual(vllm_plugin.LoomFlashAttentionBackend.get_name(), "CUSTOM")
         implementation = vllm_plugin.LoomFlashAttentionBackend.get_impl_cls()(
             num_heads=8,
             head_size=64,
@@ -161,7 +166,7 @@ class VllmPluginTest(unittest.TestCase):
         )
         tensors = self.tensors()
         result = implementation.forward(
-            "layer", attn_metadata=object(), **tensors
+            "layer", attn_metadata=self.attention_metadata(), **tensors
         )
         self.assertIs(result, tensors["output"])
         self.assertEqual(implementation.delegate_calls, 1)
@@ -178,6 +183,21 @@ class VllmPluginTest(unittest.TestCase):
             vllm_plugin.register()
             vllm_plugin.register()
         self.assertEqual(len(registrations), 1)
+
+    def test_profile_forward_without_active_binding_accepts_dummy_metadata(
+        self,
+    ) -> None:
+        registrations = []
+        with patch.dict(sys.modules, self.fake_modules(registrations), clear=False):
+            vllm_plugin.register()
+        implementation = vllm_plugin.LoomFlashAttentionBackend.get_impl_cls()(
+            8, 64, 0.125, 2
+        )
+        tensors = self.tensors()
+
+        result = implementation.forward("layer", attn_metadata=None, **tensors)
+
+        self.assertIs(result, tensors["output"])
 
     def test_metadata_builder_attaches_and_updates_step_snapshot(self) -> None:
         registrations = []
@@ -219,7 +239,11 @@ class VllmPluginTest(unittest.TestCase):
             8, 64, 0.125, 2
         )
         with self.assertRaisesRegex(RuntimeError, "delegate failure"):
-            implementation.forward("fail", attn_metadata=object(), **self.tensors())
+            implementation.forward(
+                "fail",
+                attn_metadata=self.attention_metadata(),
+                **self.tensors(),
+            )
         snapshot = implementation.loom_observer.snapshot()
         self.assertEqual(snapshot.calls, 1)
         self.assertEqual(snapshot.failures, 1)
@@ -227,9 +251,7 @@ class VllmPluginTest(unittest.TestCase):
     def test_rejects_unimplemented_delegate(self) -> None:
         registrations = []
         with patch.dict(sys.modules, self.fake_modules(registrations), clear=False):
-            with patch.dict(
-                os.environ, {"LOOM_VLLM_DELEGATE": "triton"}, clear=False
-            ):
+            with patch.dict(os.environ, {"LOOM_VLLM_DELEGATE": "triton"}, clear=False):
                 with self.assertRaisesRegex(RuntimeError, "supports only"):
                     vllm_plugin.register()
 

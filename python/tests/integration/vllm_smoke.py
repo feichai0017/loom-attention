@@ -29,7 +29,7 @@ DEFAULT_PROMPTS = (
     "The runtime tracks object identity, generation, layout, and leases. "
     "For this deterministic test, summarize the role of the scheduler:",
 )
-REPORT_SCHEMA = 1
+REPORT_SCHEMA = 2
 
 
 class SmokeFailure(RuntimeError):
@@ -84,6 +84,7 @@ def _run_backend(args: argparse.Namespace) -> dict[str, Any]:
             f"expected vLLM 0.25.x, found {vllm.__version__}; plugin APIs are pinned"
         )
     loom_plugin = None
+    binding_telemetry = None
     if args.backend == "CUSTOM":
         from loom_attention import vllm_plugin as loom_plugin
 
@@ -100,6 +101,17 @@ def _run_backend(args: argparse.Namespace) -> dict[str, Any]:
         detokenize=False,
     )
     started = perf_counter()
+    llm_options: dict[str, Any] = {}
+    if args.backend == "CUSTOM":
+        llm_options.update(
+            kv_transfer_config={
+                "kv_connector": "LoomMetadataConnector",
+                "kv_connector_module_path": "loom_attention.vllm_connector",
+                "kv_role": "kv_both",
+                "engine_id": "loom-vllm-smoke",
+            },
+            disable_hybrid_kv_cache_manager=True,
+        )
     llm = LLM(
         model=args.model,
         revision=args.revision,
@@ -112,6 +124,7 @@ def _run_backend(args: argparse.Namespace) -> dict[str, Any]:
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         disable_log_stats=True,
+        **llm_options,
     )
     startup_seconds = perf_counter() - started
 
@@ -162,6 +175,34 @@ def _run_backend(args: argparse.Namespace) -> dict[str, Any]:
             raise SmokeFailure("Loom CUSTOM backend recorded forward failures")
         if loom_telemetry["max_step_generation"] <= 0:
             raise SmokeFailure("Loom CUSTOM backend recorded no metadata builds")
+        from loom_attention import binding_telemetry_snapshot
+
+        binding_telemetry = binding_telemetry_snapshot()
+        if binding_telemetry["registry_count"] <= 0:
+            raise SmokeFailure("Loom KV connector created no block registry")
+        if binding_telemetry["metadata_steps"] <= 0:
+            raise SmokeFailure("Loom KV connector observed no scheduler steps")
+        if binding_telemetry["request_updates"] <= 0:
+            raise SmokeFailure("Loom KV connector observed no block updates")
+        if binding_telemetry["registered_cache_tensor_count"] <= 0:
+            raise SmokeFailure("Loom KV connector registered no KV cache tensors")
+        if binding_telemetry["unique_block_ids_seen"] <= 0:
+            raise SmokeFailure("Loom KV connector observed no physical block IDs")
+        if binding_telemetry["validated_attention_forwards"] <= 0:
+            raise SmokeFailure(
+                "Loom attention never validated an active block-binding step"
+            )
+        cache_devices = {
+            tensor["device"]
+            for registry in binding_telemetry["registries"]
+            for tensor in registry["cache_tensors"]
+        }
+        if not cache_devices or any(
+            not device.startswith("cuda") for device in cache_devices
+        ):
+            raise SmokeFailure(
+                f"Loom KV connector registered non-CUDA caches: {cache_devices}"
+            )
 
     return {
         "schema": REPORT_SCHEMA,
@@ -178,6 +219,7 @@ def _run_backend(args: argparse.Namespace) -> dict[str, Any]:
         "generation_seconds": generation_seconds,
         "median_generation_seconds": statistics.median(generation_seconds),
         "loom_telemetry": loom_telemetry,
+        "loom_binding_telemetry": binding_telemetry,
         "sequences": sequences,
     }
 
@@ -200,6 +242,22 @@ def _compare_run_payloads(
             differences.append("custom report recorded Loom forward failures")
         if custom_telemetry.get("max_step_generation", 0) <= 0:
             differences.append("custom report recorded no Loom metadata builds")
+    binding_telemetry = custom.get("loom_binding_telemetry")
+    if not isinstance(binding_telemetry, dict):
+        differences.append("custom report has no Loom block-binding telemetry")
+    else:
+        for field in (
+            "registry_count",
+            "metadata_steps",
+            "request_updates",
+            "registered_cache_tensor_count",
+            "unique_block_ids_seen",
+            "validated_attention_forwards",
+        ):
+            if binding_telemetry.get(field, 0) <= 0:
+                differences.append(
+                    f"custom report block-binding field {field!r} is empty"
+                )
     for field in (
         "schema",
         "model",
