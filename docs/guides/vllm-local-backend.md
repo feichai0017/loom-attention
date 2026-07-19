@@ -92,13 +92,14 @@ idempotence with fake tensor and vLLM modules.
 
 ## CUDA Acceptance Gate
 
-The repository includes `loom-vllm-smoke`, but the result is valid only
-when it runs on a Linux NVIDIA host. Install the adapter and pinned vLLM range in
-the same Python 3.10-3.12 environment:
+The repository includes `python/tests/integration/vllm_smoke.py`, but the result
+is valid only when it runs on a Linux NVIDIA host. Install the adapter and
+pinned vLLM range in the same Python 3.10-3.12 environment:
 
 ```bash
 python3 -m pip install -e './python[vllm]'
-loom-vllm-smoke compare \
+PYTHONPATH=python/src:python/tests \
+python3 -m integration.vllm_smoke compare \
   --report build/vllm-smoke/report.json
 ```
 

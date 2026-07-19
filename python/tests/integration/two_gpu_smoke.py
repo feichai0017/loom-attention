@@ -9,7 +9,8 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
-from .attention_state import ATTENTION_BACKENDS
+from loom_attention.attention_state import ATTENTION_BACKENDS
+
 from .two_gpu_benchmark import (
     DTYPE_BYTES,
     BenchmarkConfig,
@@ -102,7 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0 if report["passed"] else 1
     except (RuntimeError, ValueError) as error:
-        print(f"loom-two-gpu-smoke: {error}", file=sys.stderr)
+        print(f"integration.two_gpu_smoke: {error}", file=sys.stderr)
         return 2
 
 

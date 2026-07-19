@@ -29,11 +29,11 @@ merge combines its attention state with the remote sealed-prefix state.
 | One-node data path | NCCL Route-Q and Stage-KV benchmark harness | executed two-GPU hardware report |
 | Cross-node data path | contracts only | NIXL/UCX/GPUDirect RDMA implementation and measurements |
 
-The Python package lives under `python/src/loom_attention`, while tests live
-under `python/tests`. Reusable kernels are in `attention_state.py`, benchmark
-execution is in `two_gpu_benchmark.py`, and command-line handling is in
-`two_gpu_smoke.py`. Engine integration remains in the `vllm_*`,
-`local_delegate`, and `step_metadata` modules.
+The installable Python package lives under `python/src/loom_attention`, while
+tests live under `python/tests`. Reusable attention-state kernels stay in the
+core package. CUDA smoke tests and benchmark orchestration live under
+`python/tests/integration` and are excluded from the wheel. Engine integration
+remains in the `vllm_plugin`, `local_delegate`, and `step_metadata` modules.
 
 ## M1 Engine-Local Baseline
 
@@ -51,7 +51,7 @@ tensor values are never copied to CPU by this observer.
 
 The current adapter does not map vLLM physical block IDs to external
 `PoolObjectRef` values or install the snapshot in the Rust runtime yet, and it
-has not decoded a real model. The `loom-vllm-smoke` command is the GPU
+has not decoded a real model. The `integration.vllm_smoke` module is the GPU
 acceptance harness: it runs native and delegated backends in isolated processes,
 requires exact generated token equality, checks sampled logprobs within a fixed
 tolerance, and writes a hardware/version-qualified JSON report. The harness is
@@ -61,7 +61,7 @@ at M2.
 
 ## M2a Two-GPU Data-Path Gate
 
-`loom-two-gpu-smoke` launches two exclusive CUDA processes with an NCCL
+`integration.two_gpu_smoke` launches two exclusive CUDA processes with an NCCL
 process group. Rank 0 acts as the model worker and owns Q plus the active tail.
 Rank 1 owns the sealed prefix. The Route-Q path sends Q to rank 1, returns
 an output tensor plus FP32 log-sum-exp values, and merges them with the

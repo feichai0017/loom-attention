@@ -53,7 +53,8 @@ python3 -m pip install -e ./python --no-deps
 ## Plan Without CUDA
 
 ```bash
-loom-two-gpu-smoke plan \
+PYTHONPATH=python/src:python/tests \
+python3 -m integration.two_gpu_smoke plan \
   --prefix-tokens 4096 \
   --tail-tokens 16 \
   --rows 1 \
@@ -72,8 +73,9 @@ The default correctness tolerance follows the attention-state wire dtype:
 ## Run
 
 ```bash
+PYTHONPATH=python/src:python/tests \
 CUDA_VISIBLE_DEVICES=0,1 \
-loom-two-gpu-smoke run \
+python3 -m integration.two_gpu_smoke run \
   --prefix-tokens 4096 \
   --tail-tokens 16 \
   --rows 1 \

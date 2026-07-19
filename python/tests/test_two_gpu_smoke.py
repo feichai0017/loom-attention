@@ -3,12 +3,12 @@ import json
 import unittest
 from unittest.mock import patch
 
-from loom_attention.two_gpu_benchmark import (
+from integration.two_gpu_benchmark import (
     BenchmarkConfig,
     percentile,
     projected_transfer_bytes,
 )
-from loom_attention.two_gpu_smoke import main
+from integration.two_gpu_smoke import main
 
 
 class TwoGpuSmokeContractTest(unittest.TestCase):
@@ -76,7 +76,7 @@ class TwoGpuSmokeContractTest(unittest.TestCase):
         error = io.StringIO()
         with (
             patch(
-                "loom_attention.two_gpu_smoke.run_benchmark",
+                "integration.two_gpu_smoke.run_benchmark",
                 side_effect=RuntimeError("CUDA unavailable"),
             ),
             patch("sys.stderr", error),

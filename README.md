@@ -25,8 +25,9 @@ never synchronously queries the global controller or Holt.
 | `crates/loom-attention` | one Rust package with runtime, pool, catalog, planner, transport, and attention modules |
 | `loom-control` | slow-path catalog/scheduler binary from the `loom-attention` package |
 | `loom-worker` | attention-worker control binary from the `loom-attention` package |
-| `python/src/loom_attention` | installable vLLM adapters, attention-state executors, and GPU harnesses |
-| `python/tests` | Python unit and adapter contract tests |
+| `python/src/loom_attention` | installable vLLM adapters, metadata contracts, and attention-state executors |
+| `python/tests` | unit and adapter contract tests |
+| `python/tests/integration` | CUDA smoke tests and two-GPU benchmarks excluded from the wheel |
 
 ## Current Status
 
@@ -43,21 +44,26 @@ performance report are not implemented yet. See the
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-PYTHONPATH=python/src python3 -m unittest discover -s python/tests -v
+PYTHONPATH=python/src:python/tests \
+  python3 -m unittest discover -s python/tests -v
 ```
 
 On a Linux CUDA host with vLLM installed, run the M1 acceptance gate:
 
 ```bash
-loom-vllm-smoke compare --report build/vllm-smoke/report.json
+PYTHONPATH=python/src:python/tests \
+  python3 -m integration.vllm_smoke compare \
+  --report build/vllm-smoke/report.json
 ```
 
 Inspect the M2 payload asymmetry without CUDA, then run it on a Linux host with
 two NVIDIA GPUs:
 
 ```bash
-loom-two-gpu-smoke plan --prefix-tokens 4096
-loom-two-gpu-smoke run \
+PYTHONPATH=python/src:python/tests \
+  python3 -m integration.two_gpu_smoke plan --prefix-tokens 4096
+PYTHONPATH=python/src:python/tests \
+  python3 -m integration.two_gpu_smoke run \
   --prefix-tokens 4096 \
   --attention-backend flashinfer \
   --report build/two-gpu-smoke/report.json

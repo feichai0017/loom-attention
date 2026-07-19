@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 from time import perf_counter
 from typing import Any, Sequence
 
-from .attention_state import (
+from loom_attention.attention_state import (
     ATTENTION_BACKENDS,
     compute_attention_state,
     merge_attention_states,

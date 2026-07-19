@@ -21,16 +21,21 @@ jobs:
           python-version: "3.11"
 
       - name: Test adapter contract
-        run: PYTHONPATH=python/src python -m unittest discover -s python/tests -v
+        run: PYTHONPATH=python/src:python/tests python -m unittest discover -s python/tests -v
 
       - name: Compile adapter package
-        run: python -m compileall -q python/src/loom_attention
+        run: python -m compileall -q python/src/loom_attention python/tests/integration
 
       - name: Validate two-GPU payload plan
-        run: PYTHONPATH=python/src python -m loom_attention.two_gpu_smoke plan
+        run: PYTHONPATH=python/src:python/tests python -m integration.two_gpu_smoke plan
 
       - name: Build adapter wheel
         run: python -m pip wheel --no-deps --wheel-dir /tmp/loom-attention-wheel ./python
+
+      - name: Verify wheel excludes acceptance tools
+        run: |
+          wheel=$(find /tmp/loom-attention-wheel -name '*.whl' -print -quit)
+          ! unzip -l "$wheel" | grep -E 'loom_attention/(two_gpu|vllm_smoke)'
 
   rust:
     name: fmt · clippy · test

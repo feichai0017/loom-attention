@@ -18,10 +18,6 @@ flashinfer = ["torch>=2.4", "flashinfer-python>=0.6,<0.7"]
 [project.entry-points."vllm.general_plugins"]
 loom = "loom_attention.vllm_plugin:register"
 
-[project.scripts]
-loom-vllm-smoke = "loom_attention.vllm_smoke:main"
-loom-two-gpu-smoke = "loom_attention.two_gpu_smoke:main"
-
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["loom_attention*"]

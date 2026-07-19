@@ -251,7 +251,7 @@ def _child_command(args: argparse.Namespace, backend: str, output: Path) -> list
     return [
         sys.executable,
         "-m",
-        "loom_attention.vllm_smoke",
+        "integration.vllm_smoke",
         "run",
         "--backend",
         backend,
