@@ -26,18 +26,115 @@ pub enum AttentionExecutionMode {
     Sharded,
 }
 
+/// Generation-pinned view of the historical KV consumed by one operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvView {
+    /// Logical order is significant and must match the engine block table.
+    pub blocks: Vec<KvBlockId>,
+    pub page_table_generation: u64,
+    /// Pool read leases covering every object resolved from `blocks`.
+    pub lease_ids: Vec<String>,
+}
+
+impl KvView {
+    pub fn token_count(&self) -> u64 {
+        self.blocks
+            .iter()
+            .map(|block| u64::from(block.token_count))
+            .sum()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AttentionMask {
+    Causal,
+    SlidingWindow { window_tokens: u32 },
+    Bidirectional,
+    Custom { tensor: TensorHandle },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvAppend {
+    pub key: TensorHandle,
+    pub value: TensorHandle,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttentionOp {
     pub request_id: String,
     pub layer_id: u32,
     pub mode: AttentionExecutionMode,
     pub layout: KvLayout,
     pub query: TensorHandle,
-    pub new_key: TensorHandle,
-    pub new_value: TensorHandle,
+    /// Present only on the worker that owns the mutable tail for this step.
+    pub append: Option<KvAppend>,
     pub output: TensorHandle,
-    pub blocks: Vec<KvBlockId>,
+    pub kv: KvView,
+    pub mask: AttentionMask,
+    pub scale: f32,
     pub deadline_unix_us: u64,
+}
+
+impl AttentionOp {
+    pub fn validate(&self) -> Result<(), AttentionError> {
+        if self.request_id.is_empty() {
+            return Err(AttentionError::InvalidShape(
+                "request_id must be non-empty".into(),
+            ));
+        }
+        if !self.scale.is_finite() || self.scale <= 0.0 {
+            return Err(AttentionError::InvalidShape(
+                "attention scale must be finite and positive".into(),
+            ));
+        }
+        for (name, tensor) in [("query", &self.query), ("output", &self.output)] {
+            if tensor.bytes == 0 {
+                return Err(AttentionError::InvalidShape(format!(
+                    "{name} tensor must be non-empty"
+                )));
+            }
+        }
+        if let Some(append) = &self.append {
+            for (name, tensor) in [("append.key", &append.key), ("append.value", &append.value)] {
+                if tensor.bytes == 0 {
+                    return Err(AttentionError::InvalidShape(format!(
+                        "{name} tensor must be non-empty"
+                    )));
+                }
+            }
+        }
+        if self
+            .kv
+            .blocks
+            .iter()
+            .any(|block| block.layer_id != self.layer_id)
+        {
+            return Err(AttentionError::InvalidShape(
+                "KV view contains a block from another layer".into(),
+            ));
+        }
+        if !self.kv.blocks.is_empty()
+            && (self.kv.page_table_generation == 0 || self.kv.lease_ids.is_empty())
+        {
+            return Err(AttentionError::InvalidShape(
+                "historical KV requires a generation-pinned leased view".into(),
+            ));
+        }
+        if matches!(self.mask, AttentionMask::SlidingWindow { window_tokens: 0 }) {
+            return Err(AttentionError::InvalidShape(
+                "sliding-window attention requires a non-zero window".into(),
+            ));
+        }
+        if let AttentionMask::Custom { tensor } = &self.mask {
+            if tensor.bytes == 0 {
+                return Err(AttentionError::InvalidShape(
+                    "custom attention mask must be non-empty".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -189,6 +286,64 @@ pub fn reference_partial_attention(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{AttentionKind, DType, DeviceKind, IdentityScope, KvLayout, WorkerId};
+
+    fn tensor(bytes: u64) -> TensorHandle {
+        TensorHandle {
+            owner: WorkerId("engine".into()),
+            device_kind: DeviceKind::Cuda,
+            device_index: 0,
+            address: 0x1000,
+            bytes,
+            registration_key: None,
+            generation: 1,
+        }
+    }
+
+    fn operation() -> AttentionOp {
+        AttentionOp {
+            request_id: "request".into(),
+            layer_id: 0,
+            mode: AttentionExecutionMode::RouteQuery,
+            layout: KvLayout {
+                attention_kind: AttentionKind::Gqa,
+                dtype: DType::Bf16,
+                num_attention_heads: 32,
+                num_kv_heads: 8,
+                head_dim: 128,
+                block_tokens: 16,
+                tensor_parallel_rank: 0,
+                tensor_parallel_size: 1,
+                layout_digest: "layout".into(),
+            },
+            query: tensor(8_192),
+            append: Some(KvAppend {
+                key: tensor(2_048),
+                value: tensor(2_048),
+            }),
+            output: tensor(8_192),
+            kv: KvView {
+                blocks: vec![KvBlockId {
+                    scope: IdentityScope {
+                        tenant_id: "tenant".into(),
+                        model_id: "model".into(),
+                        tokenizer_id: "tokenizer".into(),
+                        adapter_id: None,
+                    },
+                    prefix_hash: "prefix".into(),
+                    block_hash: "block".into(),
+                    layer_id: 0,
+                    block_index: 0,
+                    token_count: 16,
+                }],
+                page_table_generation: 1,
+                lease_ids: vec!["lease".into()],
+            },
+            mask: AttentionMask::Causal,
+            scale: 0.088_388_35,
+            deadline_unix_us: 1_000,
+        }
+    }
 
     fn close(left: &[f32], right: &[f32]) {
         assert_eq!(left.len(), right.len());
@@ -212,6 +367,20 @@ mod tests {
             reference_partial_attention(&query, &keys[4..], &values[4..], 2, 2, 1.0).unwrap();
         let distributed = merge_softmax_partials(&[shard_a, shard_b]).unwrap();
         close(&expected, &distributed);
+    }
+
+    #[test]
+    fn operation_requires_leased_generation_pinned_historical_kv() {
+        let mut operation = operation();
+        assert_eq!(operation.kv.token_count(), 16);
+        operation.validate().unwrap();
+
+        operation.kv.lease_ids.clear();
+        assert!(matches!(
+            operation.validate(),
+            Err(AttentionError::InvalidShape(message))
+                if message.contains("generation-pinned leased view")
+        ));
     }
 
     #[test]

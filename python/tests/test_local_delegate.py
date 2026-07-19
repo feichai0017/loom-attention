@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from quillcache_engine.local_delegate import LocalForwardObserver, TensorContractError
+from attnarc_engine.local_delegate import LocalForwardObserver, TensorContractError
 
 
 class FakeTensor:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from quillcache_engine.step_metadata import (
+from attnarc_engine.step_metadata import (
     StepMetadataContractError,
     StepMetadataObserver,
 )

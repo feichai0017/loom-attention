@@ -1,4 +1,4 @@
-"""Engine adapters for QuillCache."""
+"""Engine adapters for AttnArc."""
 
 from .local_delegate import LocalForwardObserver, TensorContractError
 from .step_metadata import (

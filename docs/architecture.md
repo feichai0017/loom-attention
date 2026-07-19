@@ -1,23 +1,27 @@
-# QuillCache Architecture v2
+# AttnArc Architecture v3
 
 ## Positioning
 
-QuillCache is a distributed core-attention runtime attached to external KV
-pools. It does not own a general-purpose KV store and does not execute the full
-transformer model.
+AttnArc is a disaggregated core-attention runtime attached to external KV
+pools. The engine sends Q plus a generation-pinned historical KV view. It also
+sends an optional K_new/V_new append to the worker that owns the mutable tail.
+AttnArc returns the attention output; it owns neither model execution nor
+authoritative KV lifetime.
 
 ```mermaid
 flowchart TB
     Client["Client"] --> Engine["vLLM / SGLang"]
-    Engine --> Adapter["QuillCache engine adapter"]
-    Adapter --> Runtime["Node runtime\npage table + active tail + step plan"]
+    Engine --> Projection["QKV projection + RoPE"]
+    Projection --> Adapter["AttnArc engine adapter"]
+    Adapter --> Runtime["Node runtime\nKvView + active tail + step plan"]
 
     Runtime --> Local["Local attention"]
     Runtime --> Transport["Tensor transport"]
     Transport --> Worker["Remote attention worker"]
     Worker --> Merge["Exact partial-softmax merge"]
     Local --> Merge
-    Merge --> Engine
+    Merge --> Output["Attention output"]
+    Output --> Engine
 
     Pool["External KvPool\nMooncake / LMCache / KVBM"] --> Runtime
     Pool --> Worker
@@ -29,7 +33,7 @@ flowchart TB
 
 ## Ownership
 
-The engine owns model execution. The pool owns sealed KV objects. QuillCache
+The engine owns model execution. The pool owns sealed KV objects. AttnArc
 owns compute coordination and transient sequence state.
 
 An active tail stays on the model worker until it fills a complete pool object.
@@ -38,20 +42,14 @@ sealed object through a generation-checked `PoolObjectRef` and read lease.
 
 ## Repository Boundaries
 
-The Rust workspace has one shared library package, `quillcache-core`, with
-public `types`, `pool`, `scheduler`, `attention`, `runtime`, and `transport`
-modules. These contracts share one release cadence and evolve together, so
-separate packages would add manifests and dependency plumbing without providing
-a useful build boundary. `quillcache-catalog` remains a second library package
-because it is control-plane-only and isolates the Holt storage dependency from
-attention workers.
+The Rust workspace has one package, `attnarc`, with public `types`, `pool`,
+`catalog`, `scheduler`, `attention`, `runtime`, and `transport` modules. The
+same package builds the `attnarc-control` and `attnarc-worker` binaries. These
+contracts share one release cadence; separate packages previously added
+manifests and dependency plumbing without an independent release boundary.
 
-The control service and attention worker remain separate binary packages because
-they are deployed as different processes. Future code should become a separate
-package only when it needs an independent toolchain, deployment artifact,
-feature/dependency isolation, or external release surface. CUDA kernels and a
-production Mooncake integration may eventually meet that threshold; module size
-or a conceptual name alone does not.
+Native CUDA kernels and Python engine adapters remain outside the Rust package
+because they have independent language and accelerator toolchains.
 
 ## Slow And Fast Paths
 
@@ -63,6 +61,25 @@ The node runtime executes on the model-forward critical path. `begin_step`
 freezes a page-table generation and its leases. Every layer uses that cached
 plan. `commit_step` succeeds only if the sequence and page-table generations
 still match.
+
+## Attention Operation
+
+The primary operation carries registered tensor handles, not serialized tensor
+bytes:
+
+```text
+Attend(Q, KvView, optional KvAppend, layout, mask, scale, deadline) -> O
+```
+
+`KvView` contains the ordered historical block identities, the page-table
+generation, and the leases covering those blocks. Q and an optional
+K_new/V_new append are produced after projection and RoPE. A sealed-prefix
+worker receives Q only. The engine consumes O in its output projection,
+residual, and FFN path.
+
+Combining current-token KV append with attention preserves ordering without a
+second remote synchronization. A worker may publish a newly sealed block after
+the operation, but the external pool remains authoritative for its lifetime.
 
 ## Split-KV Attention
 
@@ -125,3 +142,5 @@ and cannot reconstruct preceding transformer layers by itself.
 5. A stale plan cannot commit a new tail.
 6. Partial results with incompatible shapes cannot be merged.
 7. Persistent catalog records never contain raw device addresses or rkeys.
+8. Historical KV cannot execute without a matching page-table generation and
+   covering read leases.

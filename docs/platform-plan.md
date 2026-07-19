@@ -1,4 +1,4 @@
-# QuillCache Platform Plan v2
+# AttnArc Platform Plan v3
 
 ## Research Question
 
@@ -20,7 +20,7 @@ follow only after the decode data path is measured.
 
 - remove the built-in store and byte transfer product path;
 - establish dependency-clean types, pool, catalog, planner, runtime, attention,
-  and tensor-transport packages;
+  and tensor-transport modules in one Rust package;
 - preserve only a local metadata pool for deterministic tests;
 - make implementation status explicit.
 
@@ -30,7 +30,9 @@ Exit: `cargo test --workspace` validates ownership and state-machine invariants.
 
 - add a vLLM `AttentionBackend` adapter;
 - delegate to the existing local kernel;
-- translate vLLM block tables and layouts into QuillCache types;
+- translate vLLM block tables and layouts into AttnArc types;
+- produce a Q tensor handle, optional mutable-tail K_new/V_new append, and a
+  generation-pinned `KvView`;
 - verify output equality and fallback behavior.
 
 Exit: one real model decodes through the adapter with no remote execution.

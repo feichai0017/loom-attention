@@ -10,6 +10,11 @@
 - CUDA Graph disabled;
 - complete sealed prefix blocks plus one local active tail.
 
+The M2 remote-prefix request is
+`Attend(Q, KvView, no-append, layout, causal-mask, scale) -> partial`. Historical
+KV remains on GPU 1. K_new/V_new stay with the local active tail; the exact
+merge combines its partial with the remote sealed-prefix partial.
+
 ## M1 Engine-Local Baseline
 
 The first engine adapter is an out-of-tree vLLM V1 `CUSTOM` attention backend.
@@ -26,7 +31,7 @@ tensor values are never copied to CPU by this observer.
 
 The current adapter does not map vLLM physical block IDs to external
 `PoolObjectRef` values or install the snapshot in the Rust runtime yet, and it
-has not decoded a real model. The `quillcache-vllm-smoke` command is the GPU
+has not decoded a real model. The `attnarc-vllm-smoke` command is the GPU
 acceptance harness: it runs native and delegated backends in isolated processes,
 requires exact generated token equality, checks sampled logprobs within a fixed
 tolerance, and writes a hardware/version-qualified JSON report. The harness is

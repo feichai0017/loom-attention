@@ -1,7 +1,7 @@
 """Out-of-tree vLLM attention backend that delegates to FlashAttention.
 
 The plugin registers `AttentionBackendEnum.CUSTOM`. M1 keeps all tensor math in
-vLLM's native FlashAttention implementation while QuillCache validates the
+vLLM's native FlashAttention implementation while AttnArc validates the
 local contract and records forward telemetry. Remote execution is introduced by
 later backends, not by changing this delegate's behavior.
 """
@@ -15,23 +15,23 @@ from .local_delegate import LocalForwardObserver
 from .step_metadata import StepMetadataObserver, StepMetadataSnapshot
 
 _REGISTERED = False
-_STEP_SNAPSHOT_ATTRIBUTE = "quillcache_step_snapshot"
+_STEP_SNAPSHOT_ATTRIBUTE = "attnarc_step_snapshot"
 
 
 def register() -> None:
-    """Register the QuillCache backend with vLLM's documented OOT registry."""
+    """Register the AttnArc backend with vLLM's documented OOT registry."""
 
     global _REGISTERED
-    global QuillCacheFlashAttentionBackend
-    global QuillCacheFlashAttentionImpl
-    global QuillCacheFlashAttentionMetadataBuilder
+    global AttnArcFlashAttentionBackend
+    global AttnArcFlashAttentionImpl
+    global AttnArcFlashAttentionMetadataBuilder
 
     if _REGISTERED:
         return
-    delegate = os.environ.get("QUILLCACHE_VLLM_DELEGATE", "flash_attn")
+    delegate = os.environ.get("ATTNARC_VLLM_DELEGATE", "flash_attn")
     if delegate != "flash_attn":
         raise RuntimeError(
-            "M1 supports only QUILLCACHE_VLLM_DELEGATE=flash_attn; "
+            "M1 supports only ATTNARC_VLLM_DELEGATE=flash_attn; "
             f"got {delegate!r}"
         )
 
@@ -47,20 +47,20 @@ def register() -> None:
         )
     except ImportError as error:
         raise RuntimeError(
-            "QuillCache's vLLM plugin requires vLLM 0.25.x with the V1 "
+            "AttnArc's vLLM plugin requires vLLM 0.25.x with the V1 "
             "attention backend registry"
         ) from error
 
-    class _QuillCacheFlashAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+    class _AttnArcFlashAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self._quillcache_step_observer = _step_observer_from_builder(
+            self._attnarc_step_observer = _step_observer_from_builder(
                 self, args, kwargs
             )
 
         @property
-        def quillcache_step_observer(self) -> StepMetadataObserver:
-            return self._quillcache_step_observer
+        def attnarc_step_observer(self) -> StepMetadataObserver:
+            return self._attnarc_step_observer
 
         def build(
             self,
@@ -73,7 +73,7 @@ def register() -> None:
                 common_attn_metadata,
                 fast_build=fast_build,
             )
-            snapshot = self._quillcache_step_observer.capture(
+            snapshot = self._attnarc_step_observer.capture(
                 common_prefix_tokens=int(common_prefix_len),
                 common_metadata=common_attn_metadata,
                 fast_build=bool(fast_build),
@@ -91,9 +91,9 @@ def register() -> None:
             previous = getattr(metadata, _STEP_SNAPSHOT_ATTRIBUTE, None)
             if not isinstance(previous, StepMetadataSnapshot):
                 raise RuntimeError(
-                    "QuillCache metadata is missing its node-local step snapshot"
+                    "AttnArc metadata is missing its node-local step snapshot"
                 )
-            snapshot = self._quillcache_step_observer.update_block_table(
+            snapshot = self._attnarc_step_observer.update_block_table(
                 previous,
                 block_table=blk_table,
                 slot_mapping=slot_mapping,
@@ -101,14 +101,14 @@ def register() -> None:
             setattr(updated, _STEP_SNAPSHOT_ATTRIBUTE, snapshot)
             return updated
 
-    class _QuillCacheFlashAttentionImpl(FlashAttentionImpl):
+    class _AttnArcFlashAttentionImpl(FlashAttentionImpl):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self._quillcache_observer = _observer_from_init(args, kwargs)
+            self._attnarc_observer = _observer_from_init(args, kwargs)
 
         @property
-        def quillcache_observer(self) -> LocalForwardObserver:
-            return self._quillcache_observer
+        def attnarc_observer(self) -> LocalForwardObserver:
+            return self._attnarc_observer
 
         def forward(
             self,
@@ -122,7 +122,7 @@ def register() -> None:
             output_scale: Any = None,
             output_block_scale: Any = None,
         ) -> Any:
-            token = self._quillcache_observer.before_forward(
+            token = self._attnarc_observer.before_forward(
                 query=query,
                 key=key,
                 value=value,
@@ -142,50 +142,50 @@ def register() -> None:
                     output_block_scale=output_block_scale,
                 )
             except BaseException:
-                self._quillcache_observer.after_forward(token, failed=True)
+                self._attnarc_observer.after_forward(token, failed=True)
                 raise
-            self._quillcache_observer.after_forward(token)
+            self._attnarc_observer.after_forward(token)
             return result
 
-    class _QuillCacheFlashAttentionBackend(FlashAttentionBackend):
+    class _AttnArcFlashAttentionBackend(FlashAttentionBackend):
         @staticmethod
         def get_name() -> str:
-            return "QUILLCACHE_FLASH_ATTN"
+            return "ATTNARC_FLASH_ATTN"
 
         @staticmethod
-        def get_impl_cls() -> type[_QuillCacheFlashAttentionImpl]:
-            return _QuillCacheFlashAttentionImpl
+        def get_impl_cls() -> type[_AttnArcFlashAttentionImpl]:
+            return _AttnArcFlashAttentionImpl
 
         @staticmethod
-        def get_builder_cls() -> type[_QuillCacheFlashAttentionMetadataBuilder]:
-            return _QuillCacheFlashAttentionMetadataBuilder
+        def get_builder_cls() -> type[_AttnArcFlashAttentionMetadataBuilder]:
+            return _AttnArcFlashAttentionMetadataBuilder
 
     # vLLM resolves registered classes by module-qualified name. Publish the
     # dynamic subclasses under stable names before updating the registry.
-    _QuillCacheFlashAttentionImpl.__name__ = "QuillCacheFlashAttentionImpl"
-    _QuillCacheFlashAttentionImpl.__qualname__ = "QuillCacheFlashAttentionImpl"
-    _QuillCacheFlashAttentionImpl.__module__ = __name__
-    QuillCacheFlashAttentionImpl = _QuillCacheFlashAttentionImpl
+    _AttnArcFlashAttentionImpl.__name__ = "AttnArcFlashAttentionImpl"
+    _AttnArcFlashAttentionImpl.__qualname__ = "AttnArcFlashAttentionImpl"
+    _AttnArcFlashAttentionImpl.__module__ = __name__
+    AttnArcFlashAttentionImpl = _AttnArcFlashAttentionImpl
 
-    _QuillCacheFlashAttentionMetadataBuilder.__name__ = (
-        "QuillCacheFlashAttentionMetadataBuilder"
+    _AttnArcFlashAttentionMetadataBuilder.__name__ = (
+        "AttnArcFlashAttentionMetadataBuilder"
     )
-    _QuillCacheFlashAttentionMetadataBuilder.__qualname__ = (
-        "QuillCacheFlashAttentionMetadataBuilder"
+    _AttnArcFlashAttentionMetadataBuilder.__qualname__ = (
+        "AttnArcFlashAttentionMetadataBuilder"
     )
-    _QuillCacheFlashAttentionMetadataBuilder.__module__ = __name__
-    QuillCacheFlashAttentionMetadataBuilder = (
-        _QuillCacheFlashAttentionMetadataBuilder
+    _AttnArcFlashAttentionMetadataBuilder.__module__ = __name__
+    AttnArcFlashAttentionMetadataBuilder = (
+        _AttnArcFlashAttentionMetadataBuilder
     )
 
-    _QuillCacheFlashAttentionBackend.__name__ = "QuillCacheFlashAttentionBackend"
-    _QuillCacheFlashAttentionBackend.__qualname__ = "QuillCacheFlashAttentionBackend"
-    _QuillCacheFlashAttentionBackend.__module__ = __name__
-    QuillCacheFlashAttentionBackend = _QuillCacheFlashAttentionBackend
+    _AttnArcFlashAttentionBackend.__name__ = "AttnArcFlashAttentionBackend"
+    _AttnArcFlashAttentionBackend.__qualname__ = "AttnArcFlashAttentionBackend"
+    _AttnArcFlashAttentionBackend.__module__ = __name__
+    AttnArcFlashAttentionBackend = _AttnArcFlashAttentionBackend
 
     register_backend(
         AttentionBackendEnum.CUSTOM,
-        class_path=f"{__name__}.QuillCacheFlashAttentionBackend",
+        class_path=f"{__name__}.AttnArcFlashAttentionBackend",
     )
     _REGISTERED = True
 
@@ -232,7 +232,7 @@ def _observer_from_init(
         kv_cache_dtype=str(argument("kv_cache_dtype", 6, "auto")),
         attention_type=str(argument("attn_type", 8, "decoder")),
         validate_every_call=_boolean_environment(
-            "QUILLCACHE_VALIDATE_EVERY_FORWARD", default=False
+            "ATTNARC_VALIDATE_EVERY_FORWARD", default=False
         ),
     )
 

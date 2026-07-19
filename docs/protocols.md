@@ -29,6 +29,19 @@ will not be deleted or rewritten until expiry or explicit release.
 per-layer plans. `commit_step` appends the active tail only when all generations
 still match. `abort_step` releases the single-writer slot without publishing KV.
 
+## Attention Operation
+
+The fast-path request contains Q, an optional atomic K_new/V_new append, an
+output tensor, layout, mask, scale, deadline, and `KvView`. Device tensors cross
+the data plane as registered handles. Historical KV crosses the protocol only
+as ordered block identities. A sealed-prefix shard receives Q without an
+append; exactly one mutable-tail owner may receive the append.
+
+Every non-empty `KvView` must carry a non-zero page-table generation and at
+least one lease id. Each block must belong to the requested layer and be bound
+to one of those leases in the node runtime. The current K_new/V_new append and
+attention execution form one ordered operation.
+
 ## Recovery
 
 Persistent catalog records are hints. On restart, the controller resolves every

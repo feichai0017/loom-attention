@@ -1,7 +1,7 @@
-//! Contract between QuillCache and external KV pools such as Mooncake.
+//! Contract between AttnArc and external KV pools such as Mooncake.
 //!
 //! Pools own sealed object allocation, placement, eviction, replication, and
-//! durability. QuillCache consumes object references and short-lived leases.
+//! durability. AttnArc consumes object references and short-lived leases.
 
 use crate::types::{
     KvBlockId, KvLayout, MemoryDomain, PhysicalReplica, PoolObjectRef, TensorHandle, WorkerId,

@@ -1,13 +1,13 @@
-use axum::{routing::get, Json, Router};
-use clap::Parser;
-use quillcache_core::types::{
+use attnarc::types::{
     AttentionKind, ComputeCapabilities, DType, DeviceKind, MemoryDomain, WorkerId,
 };
+use axum::{routing::get, Json, Router};
+use clap::Parser;
 use serde::Serialize;
 use std::net::SocketAddr;
 
 #[derive(Debug, Parser)]
-#[command(name = "quillcache-attention-worker")]
+#[command(name = "attnarc-worker")]
 #[command(about = "Node-local worker for distributed partial attention")]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:8090")]
@@ -33,7 +33,7 @@ struct WorkerState {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "quillcache=info".to_owned()))
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "attnarc=info".to_owned()))
         .init();
     let args = Args::parse();
     let device_kind = DeviceKind::Cpu;
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
-        service: "quillcache-attention-worker",
+        service: "attnarc-worker",
         data_path: "not configured; HTTP is control-only",
         ready_for_attention: false,
     })

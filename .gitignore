@@ -19,7 +19,7 @@ python/build/
 /build/
 
 # Runtime state
-.quillcache/
+.attnarc/
 
 # Local research corpus
 papers/

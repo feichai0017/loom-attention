@@ -3,11 +3,12 @@
 //! The global controller never participates in a per-layer lookup. A step pins
 //! a page-table generation and lease set; commit is rejected if either changed.
 
+use crate::attention::KvView;
 use crate::pool::ReadLease;
 use crate::scheduler::AttentionPlan;
-use crate::types::{KvBlockId, PoolObjectRef, SequenceBlockRef, SequenceId, WorkerId};
+use crate::types::{PoolObjectRef, SequenceBlockRef, SequenceId, WorkerId};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -77,7 +78,7 @@ impl ActiveTail {
 pub struct LayerStepPlan {
     pub layer_id: u32,
     pub attention: AttentionPlan,
-    pub blocks: Vec<KvBlockId>,
+    pub kv: KvView,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -198,6 +199,33 @@ impl SequenceRuntime {
         {
             return Err(RuntimeError::LeaseExpired(binding.lease_id.clone()));
         }
+        for layer in &layers {
+            if layer.kv.page_table_generation != state.page_table_generation {
+                return Err(RuntimeError::StalePlan);
+            }
+            if layer
+                .kv
+                .lease_ids
+                .iter()
+                .any(|lease_id| !state.leases.contains_key(lease_id))
+            {
+                return Err(RuntimeError::InvalidSequence(
+                    "attention plan references an unknown KV lease".into(),
+                ));
+            }
+            for block in &layer.kv.blocks {
+                let installed = state.page_table.values().any(|binding| {
+                    binding.sequence_ref.layer_id == layer.layer_id
+                        && binding.sequence_ref.block_id == *block
+                        && layer.kv.lease_ids.contains(&binding.lease_id)
+                });
+                if !installed {
+                    return Err(RuntimeError::InvalidSequence(
+                        "attention plan references an unbound KV block".into(),
+                    ));
+                }
+            }
+        }
         state.active_plan_id = Some(plan_id);
         Ok(PlanHandle {
             plan_id,
@@ -236,6 +264,23 @@ impl SequenceRuntime {
 
     pub fn execution_worker(&self, sequence_id: &SequenceId) -> Result<&WorkerId, RuntimeError> {
         Ok(&self.state(sequence_id)?.execution_worker)
+    }
+
+    pub fn kv_view(&self, sequence_id: &SequenceId, layer_id: u32) -> Result<KvView, RuntimeError> {
+        let state = self.state(sequence_id)?;
+        let mut blocks = Vec::new();
+        let mut lease_ids = BTreeSet::new();
+        for ((binding_layer, _), binding) in &state.page_table {
+            if *binding_layer == layer_id {
+                blocks.push(binding.sequence_ref.block_id.clone());
+                lease_ids.insert(binding.lease_id.clone());
+            }
+        }
+        Ok(KvView {
+            blocks,
+            page_table_generation: state.page_table_generation,
+            lease_ids: lease_ids.into_iter().collect(),
+        })
     }
 
     pub fn close_sequence(&mut self, sequence_id: &SequenceId) -> Result<(), RuntimeError> {
@@ -352,5 +397,20 @@ mod tests {
             RuntimeError::StepAlreadyActive("sequence".into())
         );
         runtime.abort_step(&plan).unwrap();
+    }
+
+    #[test]
+    fn builds_generation_pinned_kv_view_from_installed_pages() {
+        let mut runtime = SequenceRuntime::default();
+        let sequence = SequenceId("sequence".into());
+        runtime
+            .open_sequence(sequence.clone(), WorkerId("engine".into()), 4)
+            .unwrap();
+        install(&mut runtime, &sequence, 100);
+
+        let view = runtime.kv_view(&sequence, 0).unwrap();
+        assert_eq!(view.blocks, vec![block()]);
+        assert_eq!(view.page_table_generation, 1);
+        assert_eq!(view.lease_ids, vec!["lease"]);
     }
 }

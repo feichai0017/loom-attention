@@ -1,16 +1,19 @@
 [package]
-name = "quillcache-attention-worker"
+name = "attnarc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Distributed partial-attention worker for QuillCache"
+description = "Disaggregated attention runtime for externally managed KV"
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
 clap.workspace = true
-quillcache-core.workspace = true
+holt.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -79,6 +79,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "attnarc"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "clap",
+ "holt",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "axum"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -531,53 +547,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89ae43fd86e4158d6db51ad8e2b80f313af9cc74f5c0e03ccb87de09998732de"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "quillcache-attention-worker"
-version = "2.0.0-alpha.1"
-dependencies = [
- "axum",
- "clap",
- "quillcache-core",
- "serde",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "quillcache-catalog"
-version = "2.0.0-alpha.1"
-dependencies = [
- "holt",
- "quillcache-core",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "quillcache-control"
-version = "2.0.0-alpha.1"
-dependencies = [
- "axum",
- "clap",
- "quillcache-catalog",
- "serde",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "quillcache-core"
-version = "2.0.0-alpha.1"
-dependencies = [
- "async-trait",
- "serde",
- "thiserror",
- "tokio",
 ]
 
 [[package]]

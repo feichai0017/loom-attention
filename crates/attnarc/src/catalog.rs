@@ -4,12 +4,12 @@
 //! tracks live replicas from ordered events; Holt persists only stable object
 //! references that can be revalidated with the pool after restart.
 
-use holt::{Durability, RangeEntry, Tree, TreeBuilder};
-use quillcache_core::pool::{PoolEvent, PoolEventKind, ResolvedBlock};
-use quillcache_core::types::{
+use crate::pool::{PoolEvent, PoolEventKind, ResolvedBlock};
+use crate::types::{
     IdentityScope, KvBlockId, KvLayout, MemoryDomain, PhysicalReplica, PoolObjectRef, ReplicaState,
     WorkerId,
 };
+use holt::{Durability, RangeEntry, Tree, TreeBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -308,7 +308,7 @@ impl PersistentCatalog for HoltCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quillcache_core::types::{AttentionKind, DType};
+    use crate::types::{AttentionKind, DType};
 
     fn record(prefix: &str, block_hash: &str) -> CatalogRecord {
         let scope = IdentityScope {
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn holt_catalog_recovers_prefix_records() {
         let path =
-            std::env::temp_dir().join(format!("quillcache-catalog-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("attnarc-catalog-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         let first = record("prefix", "a");
         {
