@@ -32,10 +32,10 @@ never synchronously queries the global controller or Holt.
 ## Current Status
 
 The Rust lifecycle contracts, Holt catalog, planner, vLLM observer/delegate,
-output-plus-LSE merge, NCCL Route-Q harness, and optional contiguous-KV
-FlashInfer path are implemented and covered by contract tests. A production
-paged-KV executor, Mooncake adapter, cross-node transport, and hardware-backed
-performance report are not implemented yet. See the
+output-plus-LSE merge, NCCL Route-Q harness, and generation-pinned FlashInfer
+paged-KV executor are implemented and covered by contract tests. A Mooncake
+adapter, cross-node transport, and hardware-backed performance report are not
+implemented yet. See the
 [implementation status](docs/status.md) for exact boundaries.
 
 ## Build
@@ -65,7 +65,8 @@ PYTHONPATH=python/src:python/tests \
 PYTHONPATH=python/src:python/tests \
   python3 -m integration.two_gpu_smoke run \
   --prefix-tokens 4096 \
-  --attention-backend flashinfer \
+  --attention-backend flashinfer-paged \
+  --page-size 16 \
   --report build/two-gpu-smoke/report.json
 ```
 

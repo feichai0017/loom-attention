@@ -77,6 +77,13 @@ K_new/V_new append are produced after projection and RoPE. A sealed-prefix
 worker receives Q only. The engine consumes O in its output projection,
 residual, and FFN path.
 
+The Python paged executor is the first physical implementation of this
+operation. A node-local adapter resolves the logical `KvView` to GPU-resident
+indptr, page-index, and last-page-length tensors, then pins the FlashInfer plan
+to the table identity and generation. Updating any page-table tensor in place
+without advancing the generation violates the contract. The executor never
+persists device pointers and never reads page-table values back to the host.
+
 Combining current-token KV append with attention preserves ordering without a
 second remote synchronization. A worker may publish a newly sealed block after
 the operation, but the external pool remains authoritative for its lifetime.

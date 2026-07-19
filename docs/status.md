@@ -25,8 +25,8 @@ merge combines its attention state with the remote sealed-prefix state.
 | --- | --- | --- |
 | Rust runtime | `KvPool`, Holt catalog, planner, leases, generation-pinned `KvView`, transport handles | production pool and device transport adapters |
 | vLLM | local `CUSTOM` delegate and metadata observer | physical block to `PoolObjectRef` mapping and real-model GPU report |
-| Attention state | Rust reference plus PyTorch and FlashInfer `(O, LSE)` paths | paged-KV executor |
-| One-node data path | NCCL Route-Q and Stage-KV benchmark harness | executed two-GPU hardware report |
+| Attention state | Rust reference, contiguous PyTorch/FlashInfer paths, and generation-pinned FlashInfer paged executor | external engine/pool page-table binding |
+| One-node data path | NCCL Route-Q and Stage-KV harness with contiguous and paged modes | executed two-GPU hardware report and phase-level timings |
 | Cross-node data path | contracts only | NIXL/UCX/GPUDirect RDMA implementation and measurements |
 
 The installable Python package lives under `python/src/loom_attention`, while
@@ -73,11 +73,29 @@ The same processes then run a Stage-KV baseline that sends prefix K/V from rank
 versions, peer-access capability, workload shape, and correctness error.
 
 The harness performs real CUDA computation and NCCL transfers. Its default
-attention kernel is a PyTorch `einsum` output-plus-LSE reference; an optional
-FlashInfer path runs `single_decode_with_kv_cache` and `merge_states` against
-the same independent reference. The FlashInfer path currently consumes
-contiguous NHD KV, so M2b remains open until a paged executor is integrated and
-measured.
+attention kernel is a PyTorch `einsum` output-plus-LSE reference. The
+`flashinfer` mode runs `single_decode_with_kv_cache` over contiguous NHD KV. The
+`flashinfer-paged` mode runs `BatchDecodeWithPagedKVCacheWrapper` over NHD pages
+and uses `merge_states` for the local-tail merge. Both are checked against the
+same independent full-attention reference.
+
+## M2b Paged-KV Executor
+
+`FlashInferPagedExecutor` consumes a device-resident `PagedKvView` containing a
+logical table id, positive page-table generation, covering lease ids, page
+indices, indptr, last-page lengths, layout, and page size. It rejects invalid
+shape, dtype, layout, lease, generation, and cross-device contracts before
+launch. The executor owns its zero-initialized workspace and reuses a planned
+FlashInfer wrapper while table identity, generation, leases, shape, dtype,
+device, and scale remain unchanged. Execution returns contiguous output and
+FP32 LSE tensors without reading page-table values on the host.
+
+The two-GPU gate now has a paged mode for Route-Q and Stage-KV. Its deterministic
+fixture converts contiguous generated inputs into pages once before warmup;
+measured iterations consume or receive into those pages directly. This proves
+the acceptance-path shape but is not an external-pool zero-copy result. No
+Linux two-GPU report has been produced yet, and transfer/kernel/merge phase
+timing is not separated in the current report.
 
 ## Correctness Gate
 

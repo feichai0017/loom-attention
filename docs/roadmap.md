@@ -60,7 +60,8 @@ Exit: split execution matches the unsharded reference within dtype tolerance.
 
 ### M2b: Paged-KV Executor
 
-Status: next implementation milestone.
+Status: executor and two-GPU acceptance path implemented; hardware report,
+external page-table binding, and phase-level timing open.
 
 - consume generation-pinned page tables without repacking contiguous KV;
 - reuse planned FlashInfer wrappers and workspaces across decode steps;

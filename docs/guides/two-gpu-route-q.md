@@ -37,7 +37,8 @@ Use a CUDA-enabled PyTorch build with NCCL and two visible devices:
 python3 -m pip install -e './python[cuda]'
 ```
 
-To run the optimized contiguous-KV kernel path, install the FlashInfer extra:
+To run the optimized contiguous or paged-KV kernel path, install the FlashInfer
+extra:
 
 ```bash
 python3 -m pip install -e './python[flashinfer]'
@@ -82,8 +83,9 @@ python3 -m integration.two_gpu_smoke run \
   --query-heads 32 \
   --kv-heads 8 \
   --head-dim 128 \
+  --page-size 16 \
   --dtype float16 \
-  --attention-backend flashinfer \
+  --attention-backend flashinfer-paged \
   --warmup 10 \
   --iterations 100 \
   --report build/two-gpu-smoke/report-4k.json
@@ -109,10 +111,12 @@ attention kernels.
 
 ## Stage-KV Baseline
 
-Rank 1 sends complete prefix K and V to preallocated buffers on rank 0. Rank 0
-concatenates the local tail and computes full attention. This baseline transfers
-KV on every measured iteration; it does not model amortization from retaining a
-staged copy across later decode tokens.
+Rank 1 sends complete prefix K and V to preallocated buffers on rank 0. In
+reference and contiguous FlashInfer modes, rank 0 concatenates the local tail
+and computes full attention. In paged mode, prefix K/V are received directly
+into preallocated page storage next to the tail pages and consumed without a
+timed repack. This baseline transfers KV on every measured iteration; it does
+not model amortization from retaining a staged copy across later decode tokens.
 
 That limitation is intentional. Later experiments must add reuse horizon and
 eviction probability to determine when one Stage-KV transfer amortizes over
@@ -127,8 +131,7 @@ A reviewable report must contain:
 - peer-access capability;
 - complete workload configuration;
 - p50/p99 latency and payload bytes for both paths;
-- explicit `production_kernel: false` until the worker uses a paged optimized
-  attention kernel.
+- explicit kernel, KV layout, paged-executor, and fixture-repack metadata.
 
 The current macOS development host cannot produce this report. M2a remains open
 until the harness runs on a Linux CUDA machine with two GPUs.
@@ -137,5 +140,11 @@ until the harness runs on a Linux CUDA machine with two GPUs.
 `--attention-backend flashinfer` uses FlashInfer
 `single_decode_with_kv_cache(..., return_lse=True)` and `merge_states` for the
 measured paths, while full attention remains the independent PyTorch oracle.
-This backend still receives contiguous NHD KV; the paged external-pool executor
-remains a separate milestone.
+This backend receives contiguous NHD KV.
+
+`--attention-backend flashinfer-paged` uses
+`BatchDecodeWithPagedKVCacheWrapper.plan/run` over NHD pages. Route-Q reads the
+remote prefix pages, while Stage-KV receives directly into page storage. The
+fixture is paged once before warmup because the deterministic input generator
+starts from contiguous tensors; this is not evidence of an external-pool
+zero-copy page-table bridge.
