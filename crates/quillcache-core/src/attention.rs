@@ -3,7 +3,7 @@
 //! Executors consume registered tensor handles. The pure Rust reference math is
 //! intentionally small and exists to prove exact split-KV merge semantics.
 
-use quillcache_types::{ComputeCapabilities, KvBlockId, KvLayout, TensorHandle, WorkerId};
+use crate::types::{ComputeCapabilities, KvBlockId, KvLayout, TensorHandle, WorkerId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

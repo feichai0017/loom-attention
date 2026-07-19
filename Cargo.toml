@@ -1,25 +1,13 @@
 [workspace]
 members = [
-    "crates/quillcache-types",
-    "crates/quillcache-pool-api",
-    "crates/quillcache-pool-local",
+    "crates/quillcache-core",
     "crates/quillcache-catalog",
-    "crates/quillcache-scheduler",
-    "crates/quillcache-attention-api",
-    "crates/quillcache-runtime",
-    "crates/quillcache-tensor-transport",
     "services/quillcache-control",
     "services/quillcache-attention-worker",
 ]
 default-members = [
-    "crates/quillcache-types",
-    "crates/quillcache-pool-api",
-    "crates/quillcache-pool-local",
+    "crates/quillcache-core",
     "crates/quillcache-catalog",
-    "crates/quillcache-scheduler",
-    "crates/quillcache-attention-api",
-    "crates/quillcache-runtime",
-    "crates/quillcache-tensor-transport",
     "services/quillcache-control",
     "services/quillcache-attention-worker",
 ]
@@ -43,9 +31,5 @@ tokio = { version = "1.42", features = ["macros", "net", "rt-multi-thread", "sig
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-quillcache-attention-api = { path = "crates/quillcache-attention-api" }
+quillcache-core = { path = "crates/quillcache-core" }
 quillcache-catalog = { path = "crates/quillcache-catalog" }
-quillcache-pool-api = { path = "crates/quillcache-pool-api" }
-quillcache-scheduler = { path = "crates/quillcache-scheduler" }
-quillcache-tensor-transport = { path = "crates/quillcache-tensor-transport" }
-quillcache-types = { path = "crates/quillcache-types" }

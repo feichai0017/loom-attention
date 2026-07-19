@@ -26,14 +26,8 @@ never synchronously queries the gateway or Holt.
 
 | Package | Responsibility |
 | --- | --- |
-| `quillcache-types` | identity, KV layout, block/object/replica and capability types |
-| `quillcache-pool-api` | external storage-pool contract and read leases |
-| `quillcache-pool-local` | deterministic reference pool for CI |
-| `quillcache-catalog` | hot residency directory and Holt persistent catalog |
-| `quillcache-scheduler` | SLO-aware local/route-Q/stage-KV/sharded planning |
-| `quillcache-attention-api` | executor contract and exact online-softmax merge |
-| `quillcache-runtime` | sequence page table, active tail and step state machine |
-| `quillcache-tensor-transport` | registered-tensor transfer and completion contract |
+| `quillcache-core` | `types`, `pool`, `scheduler`, `attention`, `runtime`, and `transport` modules |
+| `quillcache-catalog` | control-plane hot directory and Holt persistent catalog |
 | `quillcache-control` | global catalog/scheduler service |
 | `quillcache-attention-worker` | node attention-worker control endpoint |
 | `python/quillcache_engine` | out-of-tree vLLM attention backend adapters |

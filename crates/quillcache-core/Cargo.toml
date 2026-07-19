@@ -1,13 +1,15 @@
 [package]
-name = "quillcache-pool-api"
+name = "quillcache-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Storage-pool contract consumed by the QuillCache attention runtime"
+description = "Core contracts, state, planning, and reference implementations for QuillCache"
 
 [dependencies]
 async-trait.workspace = true
-quillcache-types.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

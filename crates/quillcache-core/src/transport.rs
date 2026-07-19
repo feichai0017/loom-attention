@@ -4,8 +4,8 @@
 //! memory and completion events. Implementations can map this contract to CUDA
 //! IPC, NCCL, NIXL, UCX, or GPUDirect RDMA without host serialization.
 
+use crate::types::{DeviceKind, TensorHandle};
 use async_trait::async_trait;
-use quillcache_types::{DeviceKind, TensorHandle};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
@@ -128,7 +128,7 @@ impl TensorTransport for InProcessTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quillcache_types::{DeviceKind, WorkerId};
+    use crate::types::{DeviceKind, WorkerId};
 
     fn handle(bytes: u64) -> TensorHandle {
         TensorHandle {

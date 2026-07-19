@@ -36,6 +36,23 @@ An active tail stays on the model worker until it fills a complete pool object.
 Publishing transfers ownership to the pool. The runtime then consumes the
 sealed object through a generation-checked `PoolObjectRef` and read lease.
 
+## Repository Boundaries
+
+The Rust workspace has one shared library package, `quillcache-core`, with
+public `types`, `pool`, `scheduler`, `attention`, `runtime`, and `transport`
+modules. These contracts share one release cadence and evolve together, so
+separate packages would add manifests and dependency plumbing without providing
+a useful build boundary. `quillcache-catalog` remains a second library package
+because it is control-plane-only and isolates the Holt storage dependency from
+attention workers.
+
+The control service and attention worker remain separate binary packages because
+they are deployed as different processes. Future code should become a separate
+package only when it needs an independent toolchain, deployment artifact,
+feature/dependency isolation, or external release surface. CUDA kernels and a
+production Mooncake integration may eventually meet that threshold; module size
+or a conceptual name alone does not.
+
 ## Slow And Fast Paths
 
 The control service consumes pool events, maintains the hot directory, persists

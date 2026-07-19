@@ -3,10 +3,12 @@
 //! Pools own sealed object allocation, placement, eviction, replication, and
 //! durability. QuillCache consumes object references and short-lived leases.
 
-use async_trait::async_trait;
-use quillcache_types::{
+use crate::types::{
     KvBlockId, KvLayout, MemoryDomain, PhysicalReplica, PoolObjectRef, TensorHandle, WorkerId,
 };
+use async_trait::async_trait;
+
+pub mod local;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

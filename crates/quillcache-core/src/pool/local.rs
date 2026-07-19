@@ -3,19 +3,21 @@
 //! It models object generations, read leases, and ordered events. Tensor bytes
 //! stay behind opaque handles, matching the external-pool ownership boundary.
 
-use async_trait::async_trait;
-use quillcache_pool_api::{
+use super::{
     KvPool, PoolCapabilities, PoolError, PoolEvent, PoolEventKind, ReadLease, ResolvedBlock,
     SealedBlock, StageCompletion, StageRequest,
 };
-use quillcache_types::{MemoryDomain, PhysicalReplica, PoolObjectRef, ReplicaState, WorkerId};
+use crate::types::{
+    KvBlockId, MemoryDomain, PhysicalReplica, PoolObjectRef, ReplicaState, WorkerId,
+};
+use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 #[derive(Debug)]
 struct LocalState {
-    blocks: HashMap<quillcache_types::KvBlockId, ResolvedBlock>,
+    blocks: HashMap<KvBlockId, ResolvedBlock>,
     events: Vec<PoolEvent>,
     live_leases: HashSet<String>,
 }
@@ -64,10 +66,7 @@ impl KvPool for LocalKvPool {
         }
     }
 
-    async fn resolve(
-        &self,
-        blocks: &[quillcache_types::KvBlockId],
-    ) -> Result<Vec<ResolvedBlock>, PoolError> {
+    async fn resolve(&self, blocks: &[KvBlockId]) -> Result<Vec<ResolvedBlock>, PoolError> {
         let state = self.state.lock().unwrap();
         blocks
             .iter()
@@ -196,9 +195,9 @@ impl KvPool for LocalKvPool {
 
 #[cfg(test)]
 mod tests {
+    use super::SealedBlock;
     use super::*;
-    use quillcache_pool_api::SealedBlock;
-    use quillcache_types::{
+    use crate::types::{
         AttentionKind, DType, DeviceKind, IdentityScope, KvBlockId, KvLayout, TensorHandle,
     };
 

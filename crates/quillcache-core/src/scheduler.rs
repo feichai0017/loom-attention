@@ -2,10 +2,10 @@
 //!
 //! The planner compares local execution, query routing, KV staging, and
 //! sharded execution using one explicit latency model. Storage and transport
-//! implementations remain outside this crate.
+//! implementations remain outside this module.
 
-use quillcache_attention_api::AttentionExecutionMode;
-use quillcache_types::{MemoryDomain, WorkerId};
+use crate::attention::AttentionExecutionMode;
+use crate::types::{MemoryDomain, WorkerId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

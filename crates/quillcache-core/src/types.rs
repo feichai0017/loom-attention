@@ -1,6 +1,6 @@
 //! Stable, dependency-light types shared by QuillCache services and adapters.
 //!
-//! This crate deliberately knows nothing about Mooncake, vLLM, CUDA, Holt, or
+//! This module deliberately knows nothing about Mooncake, vLLM, CUDA, Holt, or
 //! any wire protocol. Physical implementations live behind outer-layer traits.
 
 use serde::{Deserialize, Serialize};

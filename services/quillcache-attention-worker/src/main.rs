@@ -1,6 +1,6 @@
 use axum::{routing::get, Json, Router};
 use clap::Parser;
-use quillcache_types::{
+use quillcache_core::types::{
     AttentionKind, ComputeCapabilities, DType, DeviceKind, MemoryDomain, WorkerId,
 };
 use serde::Serialize;

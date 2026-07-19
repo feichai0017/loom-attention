@@ -3,9 +3,9 @@
 //! The global controller never participates in a per-layer lookup. A step pins
 //! a page-table generation and lease set; commit is rejected if either changed.
 
-use quillcache_pool_api::ReadLease;
-use quillcache_scheduler::AttentionPlan;
-use quillcache_types::{KvBlockId, PoolObjectRef, SequenceBlockRef, SequenceId, WorkerId};
+use crate::pool::ReadLease;
+use crate::scheduler::AttentionPlan;
+use crate::types::{KvBlockId, PoolObjectRef, SequenceBlockRef, SequenceId, WorkerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
@@ -261,8 +261,8 @@ impl SequenceRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quillcache_pool_api::ReadLease;
-    use quillcache_types::{IdentityScope, KvBlockId};
+    use crate::pool::ReadLease;
+    use crate::types::{IdentityScope, KvBlockId};
 
     fn block() -> KvBlockId {
         KvBlockId {

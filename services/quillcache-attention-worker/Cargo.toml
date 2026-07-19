@@ -9,7 +9,7 @@ description = "Distributed partial-attention worker for QuillCache"
 [dependencies]
 axum.workspace = true
 clap.workspace = true
-quillcache-types.workspace = true
+quillcache-core.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true

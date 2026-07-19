@@ -534,21 +534,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "quillcache-attention-api"
-version = "2.0.0-alpha.1"
-dependencies = [
- "quillcache-types",
- "serde",
- "thiserror",
-]
-
-[[package]]
 name = "quillcache-attention-worker"
 version = "2.0.0-alpha.1"
 dependencies = [
  "axum",
  "clap",
- "quillcache-types",
+ "quillcache-core",
  "serde",
  "tokio",
  "tracing",
@@ -560,8 +551,7 @@ name = "quillcache-catalog"
 version = "2.0.0-alpha.1"
 dependencies = [
  "holt",
- "quillcache-pool-api",
- "quillcache-types",
+ "quillcache-core",
  "serde",
  "serde_json",
  "thiserror",
@@ -581,62 +571,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "quillcache-pool-api"
+name = "quillcache-core"
 version = "2.0.0-alpha.1"
 dependencies = [
  "async-trait",
- "quillcache-types",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "quillcache-pool-local"
-version = "2.0.0-alpha.1"
-dependencies = [
- "async-trait",
- "quillcache-pool-api",
- "quillcache-types",
- "tokio",
-]
-
-[[package]]
-name = "quillcache-runtime"
-version = "2.0.0-alpha.1"
-dependencies = [
- "quillcache-pool-api",
- "quillcache-scheduler",
- "quillcache-types",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "quillcache-scheduler"
-version = "2.0.0-alpha.1"
-dependencies = [
- "quillcache-attention-api",
- "quillcache-types",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "quillcache-tensor-transport"
-version = "2.0.0-alpha.1"
-dependencies = [
- "async-trait",
- "quillcache-types",
  "serde",
  "thiserror",
  "tokio",
-]
-
-[[package]]
-name = "quillcache-types"
-version = "2.0.0-alpha.1"
-dependencies = [
- "serde",
 ]
 
 [[package]]

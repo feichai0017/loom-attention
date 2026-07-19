@@ -5,8 +5,8 @@
 //! references that can be revalidated with the pool after restart.
 
 use holt::{Durability, RangeEntry, Tree, TreeBuilder};
-use quillcache_pool_api::{PoolEvent, PoolEventKind, ResolvedBlock};
-use quillcache_types::{
+use quillcache_core::pool::{PoolEvent, PoolEventKind, ResolvedBlock};
+use quillcache_core::types::{
     IdentityScope, KvBlockId, KvLayout, MemoryDomain, PhysicalReplica, PoolObjectRef, ReplicaState,
     WorkerId,
 };
@@ -308,7 +308,7 @@ impl PersistentCatalog for HoltCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quillcache_types::{AttentionKind, DType};
+    use quillcache_core::types::{AttentionKind, DType};
 
     fn record(prefix: &str, block_hash: &str) -> CatalogRecord {
         let scope = IdentityScope {
