@@ -18,9 +18,16 @@ forward, records process-local call telemetry, and delegates the operation
 unchanged. Therefore the real attention computation remains on the GPU inside
 vLLM; the Rust `f32` implementation is only a correctness reference.
 
-The current adapter does not translate block tables into QuillCache runtime
-types yet and has not decoded a real model. Those remain M1 exit conditions.
-Remote attention and split-KV execution begin at M2.
+The adapter also wraps `FlashAttentionMetadataBuilder`. Once per metadata build,
+it records request boundaries from vLLM's existing CPU offsets and opaque
+descriptors for the device-side block table, slot mapping, sequence lengths,
+and query offsets. Block-table updates advance a snapshot generation. Device
+tensor values are never copied to CPU by this observer.
+
+The current adapter does not map vLLM physical block IDs to external
+`PoolObjectRef` values or install the snapshot in the Rust runtime yet, and it
+has not decoded a real model. Those remain M1 exit conditions. Remote attention
+and split-KV execution begin at M2.
 
 ## Correctness Gate
 

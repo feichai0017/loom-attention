@@ -6,16 +6,46 @@ from quillcache_engine.local_delegate import LocalForwardObserver, TensorContrac
 
 
 class FakeTensor:
-    def __init__(self, shape: tuple[int, ...], device: str = "cuda:0") -> None:
+    def __init__(
+        self,
+        shape: tuple[int, ...],
+        device: str = "cuda:0",
+        *,
+        dtype: str = "torch.bfloat16",
+        address: int = 0x1000,
+        values: list[int] | None = None,
+    ) -> None:
         self.shape = shape
         self.device = device
-        self.dtype = "torch.bfloat16"
+        self.dtype = dtype
+        self.address = address
+        self.values = values
+        self.tolist_calls = 0
 
     def numel(self) -> int:
         product = 1
         for dimension in self.shape:
             product *= dimension
         return product
+
+    def data_ptr(self) -> int:
+        return self.address
+
+    def element_size(self) -> int:
+        if "64" in self.dtype:
+            return 8
+        if "32" in self.dtype:
+            return 4
+        return 2
+
+    def is_contiguous(self) -> bool:
+        return True
+
+    def tolist(self) -> list[int]:
+        self.tolist_calls += 1
+        if self.values is None:
+            raise AssertionError("test attempted to read an opaque device tensor")
+        return list(self.values)
 
 
 class LocalForwardObserverTest(unittest.TestCase):

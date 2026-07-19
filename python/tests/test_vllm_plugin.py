@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from types import ModuleType, SimpleNamespace
@@ -35,7 +36,32 @@ class FakeFlashAttentionImpl:
 class FakeFlashAttentionBackend:
     @staticmethod
     def get_builder_cls():
-        return object
+        return FakeFlashAttentionMetadataBuilder
+
+
+class FakeFlashAttentionMetadataBuilder:
+    supports_update_block_table = True
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device) -> None:
+        self.block_size = kv_cache_spec.block_size
+        self.kv_cache_dtype = kv_cache_spec.dtype
+        self.num_heads_q = 8
+        self.num_heads_kv = 2
+        self.headdim = 64
+        self.delegate_builds = 0
+
+    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        self.delegate_builds += 1
+        return SimpleNamespace(
+            block_table=common_attn_metadata.block_table_tensor,
+            slot_mapping=common_attn_metadata.slot_mapping,
+        )
+
+    def update_block_table(self, metadata, blk_table, slot_mapping):
+        updated = copy.copy(metadata)
+        updated.block_table = blk_table
+        updated.slot_mapping = slot_mapping
+        return updated
 
 
 class VllmPluginTest(unittest.TestCase):
@@ -44,6 +70,7 @@ class VllmPluginTest(unittest.TestCase):
         for name in (
             "QuillCacheFlashAttentionBackend",
             "QuillCacheFlashAttentionImpl",
+            "QuillCacheFlashAttentionMetadataBuilder",
         ):
             vllm_plugin.__dict__.pop(name, None)
 
@@ -60,6 +87,7 @@ class VllmPluginTest(unittest.TestCase):
         flash = ModuleType("vllm.v1.attention.backends.flash_attn")
         flash.FlashAttentionBackend = FakeFlashAttentionBackend
         flash.FlashAttentionImpl = FakeFlashAttentionImpl
+        flash.FlashAttentionMetadataBuilder = FakeFlashAttentionMetadataBuilder
 
         registry = ModuleType("vllm.v1.attention.backends.registry")
         custom = object()
@@ -82,6 +110,29 @@ class VllmPluginTest(unittest.TestCase):
             "kv_cache": FakeTensor((2, 32, 16, 2, 64)),
             "output": FakeTensor((4, 8 * 64)),
         }
+
+    def common_metadata(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            num_reqs=2,
+            num_actual_tokens=3,
+            max_query_len=2,
+            max_seq_len=32,
+            query_start_loc_cpu=FakeTensor(
+                (3,),
+                device="cpu",
+                dtype="torch.int32",
+                address=0x100,
+                values=[0, 1, 3],
+            ),
+            query_start_loc=FakeTensor(
+                (3,), dtype="torch.int32", address=0x200
+            ),
+            seq_lens=FakeTensor((2,), dtype="torch.int32", address=0x300),
+            block_table_tensor=FakeTensor(
+                (2, 4), dtype="torch.int32", address=0x400
+            ),
+            slot_mapping=FakeTensor((3,), dtype="torch.int64", address=0x500),
+        )
 
     def test_registers_custom_backend_and_delegates_unchanged_output(self) -> None:
         registrations = []
@@ -118,6 +169,35 @@ class VllmPluginTest(unittest.TestCase):
             vllm_plugin.register()
             vllm_plugin.register()
         self.assertEqual(len(registrations), 1)
+
+    def test_metadata_builder_attaches_and_updates_step_snapshot(self) -> None:
+        registrations = []
+        with patch.dict(sys.modules, self.fake_modules(registrations), clear=False):
+            vllm_plugin.register()
+
+        builder_class = vllm_plugin.QuillCacheFlashAttentionBackend.get_builder_cls()
+        builder = builder_class(
+            SimpleNamespace(block_size=16, dtype="torch.bfloat16"),
+            ["model.layers.0.self_attn"],
+            SimpleNamespace(),
+            "cuda:0",
+        )
+        common_metadata = self.common_metadata()
+        metadata = builder.build(16, common_metadata)
+        snapshot = metadata.quillcache_step_snapshot
+
+        self.assertEqual(builder.delegate_builds, 1)
+        self.assertEqual(snapshot.generation, 1)
+        self.assertEqual(snapshot.common_prefix_tokens, 16)
+        self.assertEqual(common_metadata.block_table_tensor.tolist_calls, 0)
+
+        updated = builder.update_block_table(
+            metadata,
+            FakeTensor((2, 6), dtype="torch.int32", address=0x600),
+            FakeTensor((3,), dtype="torch.int64", address=0x700),
+        )
+        self.assertEqual(updated.quillcache_step_snapshot.generation, 2)
+        self.assertEqual(updated.quillcache_step_snapshot.block_table.data_ptr, 0x600)
 
     def test_delegate_failure_is_recorded_and_propagated(self) -> None:
         registrations = []

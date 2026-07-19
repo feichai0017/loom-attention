@@ -43,7 +43,9 @@ never synchronously queries the gateway or Holt.
 - handle-based tensor transport API with registered-region bounds checks;
 - control-only service endpoints for the controller and attention worker;
 - vLLM `CUSTOM` backend that validates the local tensor contract and delegates
-  unchanged execution to vLLM FlashAttention.
+  unchanged execution to vLLM FlashAttention;
+- vLLM metadata-builder wrapper that records generation-checked paged-KV tensor
+  descriptors without reading device tensor contents.
 
 ## Not Implemented Yet
 

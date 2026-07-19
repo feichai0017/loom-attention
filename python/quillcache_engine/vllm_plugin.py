@@ -12,8 +12,10 @@ import os
 from typing import Any
 
 from .local_delegate import LocalForwardObserver
+from .step_metadata import StepMetadataObserver, StepMetadataSnapshot
 
 _REGISTERED = False
+_STEP_SNAPSHOT_ATTRIBUTE = "quillcache_step_snapshot"
 
 
 def register() -> None:
@@ -22,6 +24,7 @@ def register() -> None:
     global _REGISTERED
     global QuillCacheFlashAttentionBackend
     global QuillCacheFlashAttentionImpl
+    global QuillCacheFlashAttentionMetadataBuilder
 
     if _REGISTERED:
         return
@@ -36,6 +39,7 @@ def register() -> None:
         from vllm.v1.attention.backends.flash_attn import (
             FlashAttentionBackend,
             FlashAttentionImpl,
+            FlashAttentionMetadataBuilder,
         )
         from vllm.v1.attention.backends.registry import (
             AttentionBackendEnum,
@@ -43,9 +47,59 @@ def register() -> None:
         )
     except ImportError as error:
         raise RuntimeError(
-            "QuillCache's vLLM plugin requires vLLM 0.20.x with the V1 "
+            "QuillCache's vLLM plugin requires vLLM 0.25.x with the V1 "
             "attention backend registry"
         ) from error
+
+    class _QuillCacheFlashAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._quillcache_step_observer = _step_observer_from_builder(
+                self, args, kwargs
+            )
+
+        @property
+        def quillcache_step_observer(self) -> StepMetadataObserver:
+            return self._quillcache_step_observer
+
+        def build(
+            self,
+            common_prefix_len: int,
+            common_attn_metadata: Any,
+            fast_build: bool = False,
+        ) -> Any:
+            metadata = super().build(
+                common_prefix_len,
+                common_attn_metadata,
+                fast_build=fast_build,
+            )
+            snapshot = self._quillcache_step_observer.capture(
+                common_prefix_tokens=int(common_prefix_len),
+                common_metadata=common_attn_metadata,
+                fast_build=bool(fast_build),
+            )
+            setattr(metadata, _STEP_SNAPSHOT_ATTRIBUTE, snapshot)
+            return metadata
+
+        def update_block_table(
+            self,
+            metadata: Any,
+            blk_table: Any,
+            slot_mapping: Any,
+        ) -> Any:
+            updated = super().update_block_table(metadata, blk_table, slot_mapping)
+            previous = getattr(metadata, _STEP_SNAPSHOT_ATTRIBUTE, None)
+            if not isinstance(previous, StepMetadataSnapshot):
+                raise RuntimeError(
+                    "QuillCache metadata is missing its node-local step snapshot"
+                )
+            snapshot = self._quillcache_step_observer.update_block_table(
+                previous,
+                block_table=blk_table,
+                slot_mapping=slot_mapping,
+            )
+            setattr(updated, _STEP_SNAPSHOT_ATTRIBUTE, snapshot)
+            return updated
 
     class _QuillCacheFlashAttentionImpl(FlashAttentionImpl):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -102,12 +156,27 @@ def register() -> None:
         def get_impl_cls() -> type[_QuillCacheFlashAttentionImpl]:
             return _QuillCacheFlashAttentionImpl
 
+        @staticmethod
+        def get_builder_cls() -> type[_QuillCacheFlashAttentionMetadataBuilder]:
+            return _QuillCacheFlashAttentionMetadataBuilder
+
     # vLLM resolves registered classes by module-qualified name. Publish the
     # dynamic subclasses under stable names before updating the registry.
     _QuillCacheFlashAttentionImpl.__name__ = "QuillCacheFlashAttentionImpl"
     _QuillCacheFlashAttentionImpl.__qualname__ = "QuillCacheFlashAttentionImpl"
     _QuillCacheFlashAttentionImpl.__module__ = __name__
     QuillCacheFlashAttentionImpl = _QuillCacheFlashAttentionImpl
+
+    _QuillCacheFlashAttentionMetadataBuilder.__name__ = (
+        "QuillCacheFlashAttentionMetadataBuilder"
+    )
+    _QuillCacheFlashAttentionMetadataBuilder.__qualname__ = (
+        "QuillCacheFlashAttentionMetadataBuilder"
+    )
+    _QuillCacheFlashAttentionMetadataBuilder.__module__ = __name__
+    QuillCacheFlashAttentionMetadataBuilder = (
+        _QuillCacheFlashAttentionMetadataBuilder
+    )
 
     _QuillCacheFlashAttentionBackend.__name__ = "QuillCacheFlashAttentionBackend"
     _QuillCacheFlashAttentionBackend.__qualname__ = "QuillCacheFlashAttentionBackend"
@@ -119,6 +188,25 @@ def register() -> None:
         class_path=f"{__name__}.QuillCacheFlashAttentionBackend",
     )
     _REGISTERED = True
+
+
+def _step_observer_from_builder(
+    builder: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> StepMetadataObserver:
+    if "layer_names" in kwargs:
+        layer_names = kwargs["layer_names"]
+    elif len(args) > 1:
+        layer_names = args[1]
+    else:
+        raise RuntimeError("vLLM did not provide layer_names to the metadata builder")
+    return StepMetadataObserver(
+        layer_names=tuple(str(name) for name in layer_names),
+        block_size=int(builder.block_size),
+        num_attention_heads=int(builder.num_heads_q),
+        num_kv_heads=int(builder.num_heads_kv),
+        head_size=int(builder.headdim),
+        kv_cache_dtype=str(builder.kv_cache_dtype),
+    )
 
 
 def _observer_from_init(
