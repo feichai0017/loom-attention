@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quillcache-engine"
+version = "2.0.0a1"
+description = "vLLM and SGLang adapters for the QuillCache attention runtime"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = []
+
+[project.optional-dependencies]
+vllm = ["vllm>=0.20,<0.21"]
+
+[project.entry-points."vllm.general_plugins"]
+quillcache = "quillcache_engine.vllm_plugin:register"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["quillcache_engine*"]

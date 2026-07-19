@@ -36,6 +36,7 @@ never synchronously queries the gateway or Holt.
 | `quillcache-tensor-transport` | registered-tensor transfer and completion contract |
 | `quillcache-control` | global catalog/scheduler service |
 | `quillcache-attention-worker` | node attention-worker control endpoint |
+| `python/quillcache_engine` | out-of-tree vLLM attention backend adapters |
 
 ## Implemented
 
@@ -46,11 +47,13 @@ never synchronously queries the gateway or Holt.
 - exact split-KV online-softmax merge with reference correctness tests;
 - node-local single-writer step state, lease validation, and active-tail sealing;
 - handle-based tensor transport API with registered-region bounds checks;
-- control-only service endpoints for the controller and attention worker.
+- control-only service endpoints for the controller and attention worker;
+- vLLM `CUSTOM` backend that validates the local tensor contract and delegates
+  unchanged execution to vLLM FlashAttention.
 
 ## Not Implemented Yet
 
-- vLLM/SGLang attention backend adapters;
+- SGLang and remote-execution attention backend adapters;
 - CUDA partial-attention and merge kernels;
 - CUDA IPC, NCCL, NIXL, or GPUDirect RDMA transports;
 - a production Mooncake adapter;
@@ -62,6 +65,7 @@ never synchronously queries the gateway or Holt.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+PYTHONPATH=python python3 -m unittest discover -s python/tests -v
 ```
 
 Run the control endpoints:
@@ -72,7 +76,8 @@ cargo run -p quillcache-attention-worker -- --bind 127.0.0.1:8090
 ```
 
 See [architecture](docs/architecture.md), [platform plan](docs/platform-plan.md),
-and [protocol invariants](docs/protocols.md).
+[vLLM local backend](docs/vllm-local-backend.md), and
+[protocol invariants](docs/protocols.md).
 
 ## License
 

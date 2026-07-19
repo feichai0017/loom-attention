@@ -25,6 +25,7 @@ GEMINI.md
 # Python engine adapters and experiments
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
 
 # Native extension build output
