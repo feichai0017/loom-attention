@@ -7,7 +7,6 @@
 use crate::types::{DeviceKind, TensorHandle};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -23,7 +22,6 @@ pub enum TransportError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
-    InProcess,
     CudaIpc,
     CudaP2p,
     Nccl,
@@ -83,48 +81,6 @@ pub trait TensorTransport: std::fmt::Debug + Send + Sync {
     async fn submit(&self, transfer: TensorTransfer) -> Result<TransferCompletion, TransportError>;
 }
 
-/// Metadata-only implementation used to validate planner/runtime contracts.
-#[derive(Debug)]
-pub struct InProcessTransport {
-    capabilities: TransportCapabilities,
-    next_completion: AtomicU64,
-}
-
-impl Default for InProcessTransport {
-    fn default() -> Self {
-        Self {
-            capabilities: TransportCapabilities {
-                kind: TransportKind::InProcess,
-                source_devices: vec![DeviceKind::Cpu, DeviceKind::Cuda],
-                destination_devices: vec![DeviceKind::Cpu, DeviceKind::Cuda],
-                supports_device_direct: true,
-                supports_cuda_stream: true,
-            },
-            next_completion: AtomicU64::new(1),
-        }
-    }
-}
-
-#[async_trait]
-impl TensorTransport for InProcessTransport {
-    fn capabilities(&self) -> &TransportCapabilities {
-        &self.capabilities
-    }
-
-    async fn submit(&self, transfer: TensorTransfer) -> Result<TransferCompletion, TransportError> {
-        transfer.validate()?;
-        Ok(TransferCompletion {
-            completion_id: format!(
-                "in-process-{}",
-                self.next_completion.fetch_add(1, Ordering::Relaxed)
-            ),
-            transferred_bytes: transfer.bytes,
-            kind: TransportKind::InProcess,
-            cuda_event: transfer.cuda_stream,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,9 +98,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn validates_registered_bounds_before_submission() {
-        let transport = InProcessTransport::default();
+    #[test]
+    fn rejects_out_of_bounds_tensor_range() {
         let transfer = TensorTransfer {
             source: handle(16),
             source_offset: 8,
@@ -155,7 +110,7 @@ mod tests {
             deadline_unix_us: 100,
         };
         assert_eq!(
-            transport.submit(transfer).await.unwrap_err(),
+            transfer.validate().unwrap_err(),
             TransportError::OutOfBounds
         );
     }

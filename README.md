@@ -5,11 +5,6 @@ LLM serving. vLLM or SGLang keeps model execution; Mooncake, LMCache, or another
 `KvPool` owns sealed KV objects; QuillCache schedules attention near those
 objects and merges exact partial-softmax results.
 
-This repository made an intentional breaking architecture change at `v2`.
-The previous built-in KV store, byte-oriented transfer engine, OpenAI proxy,
-P/D demos, and storage connector were removed. They mixed storage ownership
-with attention execution and remain available in Git history.
-
 ## Boundary
 
 | Component | Owns |
@@ -20,7 +15,7 @@ with attention execution and remain available in Git history.
 | Holt catalog | persistent `prefix -> PoolObjectRef` metadata, revalidated after recovery |
 
 The control service is a slow path. Per-layer execution uses node-local state and
-never synchronously queries the gateway or Holt.
+never synchronously queries the global controller or Holt.
 
 ## Workspace
 

@@ -17,8 +17,9 @@ AI infra for LLMs has one recurring pattern:
 5. Evaluate with SLO goodput, latency tails, utilization, and cost, not only raw
    throughput.
 
-QuillCache should use the same pattern. It treats KV cache as inference state:
-observable, routable, transferable, persistent, and identity-governed.
+QuillCache uses the same pattern: the external pool owns sealed KV objects, and
+the runtime is designed to choose where core attention executes relative to
+those objects. The current adapter still executes attention locally.
 
 ## Local Paper Groups
 
@@ -28,9 +29,9 @@ Read first because this is closest to ByteDance AML / Seed systems style.
 
 | Paper | Local file | Core idea | QuillCache connection |
 | --- | --- | --- | --- |
-| MegaScale-Infer | `papers/megascale-infer-sigcomm25-2504.02263.pdf` | Disaggregate attention and FFN for MoE serving; use ping-pong pipeline and M2N communication. | Extends our co-scheduler thinking beyond P/D into module-level resource pools. |
-| Flux | `papers/flux-comm-overlap-2406.06858.pdf` | Fine-grained communication/computation overlap through kernel fusion. | Supports the layer-wise transfer overlap thesis. |
-| Comet | `papers/comet-moe-overlap-mlsys25-2502.19811.pdf` | Data-dependency-aware task rescheduling for MoE overlap. | Suggests `comm_stall_ms` and overlap efficiency as first-class telemetry. |
+| MegaScale-Infer | `papers/megascale-infer-sigcomm25-2504.02263.pdf` | Disaggregate attention and FFN for MoE serving; use ping-pong pipeline and M2N communication. | Motivates separate model and attention workers plus workload-specific communication. |
+| Flux | `papers/flux-comm-overlap-2406.06858.pdf` | Fine-grained communication/computation overlap through kernel fusion. | Motivates measuring exposed Q/O communication after overlap. |
+| Comet | `papers/comet-moe-overlap-mlsys25-2502.19811.pdf` | Data-dependency-aware task rescheduling for MoE overlap. | Guides dependency-aware local/remote partial execution and merge. |
 
 What to learn:
 
@@ -42,19 +43,18 @@ What to learn:
 
 QuillCache tasks:
 
-- add predicted-versus-actual transfer/TTFT experiment;
-- expose overlap efficiency in `/v1/state.co_scheduler`;
-- teach the co-scheduler to reason about queueing, transfer, and compute as one
-  budget.
+- implement one-node Route-Q and exact partial-softmax merge;
+- compare Local, RouteQuery, StageKv, and Sharded under one workload;
+- measure queueing, Q/O transport, kernels, merge, and exposed wait separately.
 
 ### 2. KV Cache Memory And Storage Tiers
 
 | Paper | Local file | Core idea | QuillCache connection |
 | --- | --- | --- | --- |
-| CXL KV Cache | `papers/cxl-kv-cache-storage-neurips24.pdf` | Use CXL memory as a KV cache tier under TTFT SLO. | Extends `CacheTier` and cost model beyond HBM/DRAM/SSD. |
-| Tutti | `papers/tutti-ssd-kv-2605.03375.pdf` | Make SSD-backed KV practical using GPU-centric bulk I/O and slack-aware scheduling. | Guides future DiskTier/GDS design and transfer scheduling. |
-| InstInfer | `papers/instinfer-in-storage-attention-2409.04992.pdf` | Move long-context attention near storage. | A stronger baseline than naive SSD fetch for very long contexts. |
-| LMCache | `papers/lmcache-2510.09665.pdf` | Production KV cache layer for vLLM/SGLang. | Direct external baseline for connector and offload behavior. |
+| CXL KV Cache | `papers/cxl-kv-cache-storage-neurips24.pdf` | Use CXL memory as a KV cache tier under TTFT SLO. | Extends external-pool placement and attention cost candidates beyond HBM/DRAM. |
+| Tutti | `papers/tutti-ssd-kv-2605.03375.pdf` | Make SSD-backed KV practical using GPU-centric bulk I/O and slack-aware scheduling. | Guides SSD-backed `KvPool` and StageKv policy. |
+| InstInfer | `papers/instinfer-in-storage-attention-2409.04992.pdf` | Move long-context attention near storage. | Direct baseline for future `NearStorage` executors. |
+| LMCache | `papers/lmcache-2510.09665.pdf` | Production KV cache layer for vLLM/SGLang. | External-pool integration baseline. |
 
 What to learn:
 
@@ -65,9 +65,9 @@ What to learn:
 
 QuillCache tasks:
 
-- extend `TransferObservation` with tier-specific measured costs;
-- build reuse-versus-transfer-versus-recompute plots;
-- document CXL/NVMe as future tiers without claiming hardware validation.
+- add real `KvPool` adapters and tier-specific cost measurements;
+- compare RouteQuery, StageKv, and recompute boundaries;
+- keep CXL/NVMe as unvalidated future memory domains until hardware tests exist.
 
 ### 3. KV Cache Safety And Identity
 
@@ -84,17 +84,17 @@ What to learn:
 QuillCache tasks:
 
 - add a threat-model note for identity-aware reuse;
-- keep identity refusal metrics visible in gateway state and Prometheus;
+- expose identity and generation refusal metrics from the runtime;
 - create a demo where content matches but identity mismatch refuses reuse.
 
 ### 4. Serving Baselines
 
 | Paper | Local file | Core idea | QuillCache connection |
 | --- | --- | --- | --- |
-| DistServe | `papers/distserve-osdi24-2401.09670.pdf` | P/D disaggregation for goodput. | Basis for `EngineRole`, P/D planning, and SLO goodput. |
-| Mooncake | `papers/mooncake-fast25-2407.00079.pdf` | KVCache-centric disaggregated architecture. | Store/transfer/master decomposition baseline. |
-| PagedAttention / vLLM | `papers/pagedattention-vllm-sosp23-2309.06180.pdf` | Paged KV memory management. | Engine boundary and connector correctness. |
-| SGLang | `papers/sglang-radixattention-2312.07104.pdf` | Radix prefix reuse. | Prefix index and residency design. |
+| DistServe | `papers/distserve-osdi24-2401.09670.pdf` | P/D disaggregation for goodput. | SLO-goodput evaluation baseline. |
+| Mooncake | `papers/mooncake-fast25-2407.00079.pdf` | KVCache-centric disaggregated architecture. | External `KvPool` and transfer baseline. |
+| PagedAttention / vLLM | `papers/pagedattention-vllm-sosp23-2309.06180.pdf` | Paged KV memory management. | Current engine-adapter and block-table boundary. |
+| SGLang | `papers/sglang-radixattention-2312.07104.pdf` | Radix prefix reuse. | Future engine adapter and prefix identity source. |
 | NIXL benchmark | `papers/nixl-gpudirect-benchmark-iit-2025.pdf` | GPUDirect performance depends on topology and I/O size. | Avoids assuming RDMA/GDS is always faster. |
 
 ## Reading Template

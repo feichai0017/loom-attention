@@ -100,8 +100,9 @@ The strongest signal is not just speedup. It is the ablation chain:
 
 ## Connection To QuillCache
 
-QuillCache does not disaggregate attention and FFN today. The useful transfer is
-the control-plane pattern:
+QuillCache's architecture separates core attention from the model worker while
+leaving QKV projection, FFN, and sampling in the inference engine. The current
+adapter still delegates to local FlashAttention. The useful pattern is:
 
 - identify each module's resource profile;
 - expose measurements for the slow boundary;
@@ -113,32 +114,31 @@ Mapping:
 
 | MegaScale-Infer | QuillCache |
 | --- | --- |
-| Attention nodes | Prefill/decode workers that own live KV and attention state |
-| Expert nodes | Remote KV tiers / transfer backends / future specialized compute pools |
-| M2N token dispatch | KV block/layer transfer among many producers and consumers |
-| Ping-pong pipeline | Layer-wise KV transfer overlap |
-| Deployment plan | Co-scheduler plan: P/D ratio, HBM split, tier placement, transfer depth |
-| Expert imbalance | Hot prefix skew and uneven KV residency |
+| Attention nodes | QuillCache workers that execute near leased KV objects |
+| Expert nodes | Model workers that retain projection, FFN, and sampling |
+| M2N token dispatch | Query and partial-result traffic between model and attention workers |
+| Ping-pong pipeline | Overlap remote-prefix attention, local-tail attention, and merge |
+| Deployment plan | Choose Local, RouteQuery, StageKv, or Sharded execution |
+| Expert imbalance | KV placement skew and attention-worker queue imbalance |
 
 ## Design Implications
 
 1. Add overlap metrics, not just transfer time.
-   QuillCache already reports `time_to_first_layer_us`, `full_transfer_us`, and
-   `overlap_window_us`, and now derives `overlap_efficiency_pct` for the
-   co-scheduler.
+   The future executor should report Q/O transport, local and remote kernels,
+   merge time, and exposed communication after overlap.
 
-2. Treat transfer depth like micro-batch count.
-   In-flight layer depth has the same shape as MegaScale-Infer's micro-batch
-   count: too low leaves idle time; too high increases pressure and contention.
+2. Treat remote-partial depth like micro-batch count.
+   Too little concurrency leaves GPU and link bubbles; too much increases queue
+   pressure, memory use, and tail latency.
 
 3. Balance phases by measured time.
    MegaScale-Infer balances attention and FFN time. QuillCache should balance
-   prefill compute, decode compute, and KV fetch time in the co-scheduler.
+   query transport, remote attention, local-tail attention, merge, and KV stage.
 
 4. Preserve generic fallback.
    MegaScale-Infer optimizes M2N because NCCL is a bad fit for that pattern.
-   QuillCache should adopt NIXL/UCX for GPU transfer later, but TCP remains the
-   correctness fallback and experiment baseline.
+   QuillCache should evaluate CUDA P2P/NCCL on one node and NIXL/UCX across
+   nodes, with an explicit CPU-staged correctness baseline.
 
 5. Use cost per GPU, not only latency.
    Heterogeneous deployment matters because attention and FFN have different
@@ -147,24 +147,21 @@ Mapping:
 
 ## Proposed QuillCache Tasks
 
-P0: Document and expose overlap efficiency. Done.
+P0: Implement the one-node Route-Q path.
 
-- Add a derived value in state/docs:
-  `overlap_efficiency = overlap_window_us / max(full_transfer_us, 1)`.
-- Use it as a co-scheduler signal but keep actions dry-run.
+- Send Q to a second GPU holding a sealed prefix.
+- Run local-tail and remote-prefix attention concurrently.
+- Merge exact online-softmax statistics and compare against local attention.
 
-P1: Build predicted-versus-actual experiment.
+P1: Compare execution modes.
 
-- Send repeated-prefix requests through gateway.
-- Record estimated TTFT headers, actual streaming TTFT, and transfer telemetry.
-- Plot predicted error and overlap efficiency.
+- Measure Local, RouteQuery, StageKv, and Sharded under the same KV lengths.
+- Report planner estimate error, end-to-end decode time, and bytes moved.
 
-P2: Add a transfer-depth dry-run action.
+P2: Sweep remote work depth.
 
-- If `time_to_first_layer` is good but `full_transfer` is long, keep overlap.
-- If transfer queue depth is high and overlap is poor, reduce depth or prefer
-  recompute.
-- If repeated remote hits appear for a hot prefix, suggest replication.
+- Vary in-flight partials and batch size.
+- Report throughput, P99 decode latency, queueing, overlap, and GPU utilization.
 
 ## Interview Takeaway
 
@@ -178,6 +175,6 @@ MegaScale-Infer is a clean example of production AI infra reasoning:
 
 For QuillCache, the analogous story is:
 
-> KV cache movement should not be treated as a blob copy. It should be scheduled
-> like a pipeline stage with measured time-to-first-layer, full-transfer time,
-> queue depth, and overlap efficiency feeding back into routing and placement.
+> Distributed attention should be scheduled as a pipeline of query transport,
+> local and remote kernels, partial-result transport, and exact merge, with each
+> exposed delay measured separately.

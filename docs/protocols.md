@@ -39,4 +39,4 @@ directory entry. Missing objects are removed from the catalog.
 
 Tensor handles are ephemeral capabilities containing owner, device, address,
 length, registration key, and generation. They may cross a trusted data-plane
-protocol but are never written to Holt or exposed through the public gateway.
+protocol but are never written to Holt or exposed through public control APIs.

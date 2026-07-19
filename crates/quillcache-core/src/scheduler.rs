@@ -103,24 +103,6 @@ impl AttentionCostModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClusterActionKind {
-    RejectAdmission,
-    ReplicateSealedPrefix,
-    MigrateSealedPrefix,
-    TuneTransferDepth,
-    AdjustPrefillDecodeRatio,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClusterAction {
-    pub kind: ClusterActionKind,
-    pub target_worker: Option<WorkerId>,
-    pub reason: String,
-    pub value: Option<u64>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

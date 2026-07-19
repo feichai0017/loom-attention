@@ -5,7 +5,7 @@ Papers:
 - `papers/flux-comm-overlap-2406.06858.pdf`
 - `papers/comet-moe-overlap-mlsys25-2502.19811.pdf`
 
-Question for QuillCache: what should a KV-cache control plane learn from
+Question for QuillCache: what should a distributed attention runtime learn from
 kernel-level and MoE-level communication/computation overlap systems?
 
 ## Shared Lesson
@@ -18,9 +18,8 @@ Flux, Comet, and MegaScale-Infer all make the same systems move:
 4. Keep compute efficiency from collapsing while exposing overlap.
 5. Tune the overlap using runtime shape, topology, and queueing signals.
 
-For QuillCache, the equivalent unit is not a GEMM tile or an expert token. It is
-a KV layer, block, or prefix segment that becomes consumable before the whole
-KV object has arrived.
+For QuillCache, the equivalent unit is a query batch, KV shard, or partial
+softmax result that can execute before all remote work finishes.
 
 ## Flux Digest
 
@@ -158,63 +157,56 @@ preserving expert compute efficiency.
 | --- | --- | --- | --- | --- |
 | Flux | Tensor-parallel GEMM + communication | GEMM tile | effective communication time, overlap efficiency | measure exposed transfer and separate it from compute |
 | Comet | MoE dispatch/expert/combine pipeline | shared-tensor slice / thread block | hidden communication %, optimal comm/compute block split | dependency-aware readiness and adaptive resource split |
-| QuillCache | KV-cache routing, transfer, and tier placement | KV layer, block, or prefix segment | time-to-first-layer, full transfer, queue depth, overlap efficiency | schedule KV as a pipeline stage, not a blob copy |
+| QuillCache | distributed attention over externally owned KV | query batch, KV shard, partial result | queue, transport, kernel, merge, and exposed wait time | schedule local and remote partial attention as one dependency graph |
 
 ## Design Implications For QuillCache
 
-1. Add exposed-transfer accounting.
-   `overlap_efficiency_pct` is useful, but Flux suggests also tracking an
-   effective exposed transfer time:
-   `exposed_transfer_ms = full_transfer_ms - overlap_saved_ms`.
+1. Measure exposed communication.
+   Record how much Route-Q transport remains visible after remote attention and
+   local-tail execution overlap. Raw link bandwidth does not answer that.
 
 2. Treat readiness as a dependency graph.
-   Comet's shared-tensor analysis maps to a KV readiness graph:
-   layer 0 unlocks decode start, later layers unlock continued decode, and a
-   prefix is only routable when identity and tier constraints pass.
+   A leased sealed prefix can run remotely while the active tail runs locally;
+   merge starts only after shape-compatible partial statistics are ready.
 
 3. Separate transport speed from overlap quality.
    A faster backend can still be bad if it delays first-layer readiness or
    creates queueing. A slower backend can be acceptable if most of its transfer
    is hidden.
 
-4. Tune in-flight depth with measurements.
+4. Tune remote in-flight depth with measurements.
    Flux and Comet both show that finer granularity helps only until scheduling
-   overhead or compute underutilization dominates. QuillCache should sweep
-   `max_inflight` and plot first-layer latency, full-transfer latency, queue
-   depth, and overlap efficiency.
+   overhead or compute underutilization dominates. QuillCache should sweep the
+   number of concurrent remote partials and report queue, transport, kernel,
+   merge, and end-to-end decode time.
 
 5. Do not claim kernel-level novelty.
-   Flux and Comet own the CUDA-kernel side. QuillCache's research position is a
-   vendor-neutral control plane that consumes these kinds of signals across real
-   vLLM/SGLang/KV backends.
+   The initial research claim is execution placement and exact distributed
+   attention semantics. A future CUDA kernel must earn a separate claim through
+   kernel-level baselines.
 
 ## Concrete Follow-Up Experiments
 
-P0: Add exposed transfer time to gateway/co-scheduler state. Done.
+P0: Build the one-node Route-Q path.
 
-- `exposed_transfer_ms = full_transfer_ms - overlap_saved_ms`.
-- This is closer to Flux's effective communication-time framing.
+- Run the sealed prefix on a second GPU and the active tail on the model GPU.
+- Return online-softmax statistics and compare the merged output with unsharded
+  attention.
 
-P1: Build a transfer-depth sweep.
+P1: Build a remote-depth sweep.
 
 - Sweep `max_inflight = 1, 2, 4, 8`.
-- Record time-to-first-layer, full-transfer, overlap efficiency, bandwidth, and
-  queue depth.
-- Use local TCP first, then repeat with cloud GPU transfer backends when
-  available.
+- Record queue, Q/O transfer, remote kernel, local-tail kernel, merge, and
+  exposed wait time.
+- Start with CUDA P2P or NCCL, then repeat across nodes with a registered-device
+  transport.
 
-P2: Build predicted-versus-actual TTFT plots.
+P2: Build predicted-versus-actual decode-time plots.
 
-- Compare planner-estimated transfer time against connector-reported telemetry.
-- Label points by backend, tier, byte size, and in-flight depth.
+- Compare planner estimates against executor and transport telemetry.
+- Label points by execution mode, topology, KV length, and in-flight depth.
 - The graph should answer whether QuillCache's routing cost model predicts real
-  first-token behavior.
-
-P3: Add dependency-aware action reasons.
-
-- Instead of only saying `TuneTransferDepth`, explain which boundary is bad:
-  first layer is late, exposed transfer is high, queue depth is high, or
-  bandwidth is low.
+  decode behavior.
 
 ## Interview Takeaway
 
@@ -224,6 +216,6 @@ For ByteDance AML-style AI infra, the pattern is:
 > understand the dependency that prevents overlap, reduce the scheduling unit,
 > and verify that compute efficiency does not collapse.
 
-QuillCache applies that pattern at the KV-cache control-plane level: it turns KV
-movement into measured, dependency-aware pipeline state that routing and
-placement can react to.
+QuillCache applies that pattern to distributed core attention: local and remote
+partial attention, Q/O transport, and exact merge form one measured dependency
+graph.
