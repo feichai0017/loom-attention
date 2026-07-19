@@ -1,6 +1,11 @@
 """Engine integration and distributed-attention utilities for Loom."""
 
 from .local_delegate import LocalForwardObserver, TensorContractError
+from .paged_executor import (
+    FlashInferPagedExecutor,
+    PagedKvContractError,
+    PagedKvView,
+)
 from .step_metadata import (
     StepMetadataContractError,
     StepMetadataObserver,
@@ -10,6 +15,9 @@ from .step_metadata import (
 
 __all__ = [
     "LocalForwardObserver",
+    "FlashInferPagedExecutor",
+    "PagedKvContractError",
+    "PagedKvView",
     "StepMetadataContractError",
     "StepMetadataObserver",
     "StepMetadataSnapshot",
