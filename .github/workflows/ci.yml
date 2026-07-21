@@ -50,6 +50,21 @@ jobs:
       - name: Build Python adapter wheel
         run: python -m pip wheel --no-deps --wheel-dir /tmp/loom-kernels-wheel ./python
 
+      - name: Install and inspect Python adapter wheel
+        run: |
+          python -m pip install --force-reinstall /tmp/loom-kernels-wheel/*.whl
+          python -m pip check
+          python - <<'PY'
+          from importlib.metadata import entry_points, version
+
+          import loom_kernels
+
+          assert version("loom-kernels") == loom_kernels.__version__
+          plugins = entry_points(group="vllm.general_plugins")
+          assert any(plugin.name == "loom_kernels" for plugin in plugins)
+          print(f"loom-kernels {loom_kernels.__version__}")
+          PY
+
   website:
     name: astro website
     runs-on: ubuntu-latest

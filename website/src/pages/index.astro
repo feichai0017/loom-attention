@@ -55,7 +55,7 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 
   <section class="metrics-strip" aria-label="Project status">
     <div class="metric"><strong>05</strong><span>qualified operator paths</span></div>
-    <div class="metric"><strong>61/61</strong><span>H20 Python tests passing</span></div>
+    <div class="metric"><strong>62/62</strong><span>H20 Python tests passing</span></div>
     <div class="metric"><strong>SM90</strong><span>NVIDIA H20 evidence</span></div>
     <div class="metric"><strong>v0.24</strong><span>vLLM integration target</span></div>
   </section>
@@ -148,8 +148,9 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, "");
       ))}
     </div>
     <p class="caveat">
-      Operator-level ratios are not model-level throughput claims. End-to-end
-      TTFT, TPOT, memory, and goodput remain separate admission gates.
+      The pinned Qwen2.5 gate proves exact-token engine invocation, but its
+      0.999–1.004× end-to-end result is parity. Serving-scale TTFT, TPOT,
+      memory, and goodput remain separate admission gates.
     </p>
   </section>
 

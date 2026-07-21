@@ -13,7 +13,9 @@ performance win.
 A second opt-in replaces vLLM 0.24's fused SiLU-and-Mul plus dynamic symmetric
 per-block FP8 implementations for group sizes 64 and 128. This boundary is
 bitwise compatible with vLLM's fused operator and has an operator-level H20
-advantage, but has not yet run inside a real FP8 model engine graph.
+advantage. It has also completed a pinned Qwen2.5 online-FP8 engine gate with
+direct compiler-match and launch evidence; that small-model end-to-end result
+is at parity rather than a demonstrated speedup.
 
 The registered contract is:
 
@@ -128,6 +130,15 @@ scale upper bound and row-major or transposed scale storage. Registration is
 intentionally version-specific to vLLM 0.24's activation-quant compiler pass;
 unsupported versions should leave the opt-in unset.
 
+The provider can only replace a graph-visible activation-quant boundary. On
+the tested H20 stack, vLLM's automatic `fp8_per_block` selection uses a
+FlashInfer/DeepGEMM linear kernel that accepts BF16 and performs activation
+quantization inside GEMM. That path contains no separate node for Loom to
+replace. The engine A/B therefore fixes `linear_backend="cutlass"`, enables
+the `quant_fp8` custom op, and enables `fuse_act_quant` for both providers. The
+GEMM is identical on both sides; only the fused activation-quant operator
+changes.
+
 To verify selection without starting an engine:
 
 ```bash
@@ -161,6 +172,18 @@ PY
   --dtype bf16 --rows 8 --width 11008 --group-size 128 \
   --warmup 100 --iterations 2000 --samples 15 \
   --provider-order forward
+
+.venv-vllm/bin/python benchmarks/vllm_engine_fp8_ab.py \
+  --model /path/to/Qwen2.5-0.5B-Instruct \
+  --case 1x128x128 --case 8x128x128 --case 32x128x64 \
+  --warmup 2 --repeats 7 --provider-order baseline-first \
+  --result-json /tmp/qwen25-fp8-baseline-first.json
+
+.venv-vllm/bin/python benchmarks/vllm_engine_fp8_ab.py \
+  --model /path/to/Qwen2.5-0.5B-Instruct \
+  --case 1x128x128 --case 8x128x128 --case 32x128x64 \
+  --warmup 2 --repeats 7 --provider-order loom-first \
+  --result-json /tmp/qwen25-fp8-loom-first.json
 ```
 
 The microbenchmark compares `loom_cuda` and `vllm_c` through the same vLLM IR
@@ -191,6 +214,16 @@ but rounds an intermediate BF16 tensor, so it is not the exact correctness
 baseline. See the
 [H20 fused activation-quant report](../results/h20-silu-and-mul-dynamic-fp8-20260721.json).
 
+The real-model gate pins Qwen2.5-0.5B-Instruct, online-quantizes it with
+vLLM's `fp8_per_block` mode, and runs each provider in a fresh process with an
+isolated compile cache. Both provider orders matched every generated token,
+each compiler graph recorded two activation-quant matches, and the launch
+probe recorded 1584 Loom submissions only in the Loom process. Across the
+three cases, batch-latency ratios ranged from `0.9991x` to `1.0043x`, so this
+is integration and correctness evidence rather than a model-level performance
+claim. See the
+[H20 Qwen2.5 engine report](../results/h20-vllm-qwen25-05b-fp8-engine-20260722.json).
+
 The compatible arithmetic and schema follow vLLM 0.24's
 [fused CUDA implementation](https://github.com/vllm-project/vllm/blob/v0.24.0/csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu)
 and its documented
@@ -209,5 +242,7 @@ dispatcher bridge follows PyTorch's
 - one selectable IR provider (`fused_add_rms_norm`), one opt-in out-of-tree
   layer replacement (`SiluAndMul`), and one vLLM-version-specific
   activation-quant fusion-table replacement;
-- the isolated operator is faster on H20, but no model-level speedup has been
-  established.
+- the activation-quant provider requires a graph-visible quantization boundary;
+  it does not intercept vLLM's fused BF16-input FlashInfer/DeepGEMM path;
+- the isolated operator is faster on H20 and real-model invocation is proven,
+  but no model-level speedup has been established.

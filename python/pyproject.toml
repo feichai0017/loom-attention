@@ -6,8 +6,22 @@ build-backend = "setuptools.build_meta"
 name = "loom-kernels"
 version = "2.0.0a1"
 description = "PyTorch and vLLM adapters for the Loom Kernels CUDA backend"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+keywords = ["cuda", "inference", "llm", "pytorch", "rust", "vllm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Documentation = "https://feichai0017.github.io/loom-kernels/"
+Issues = "https://github.com/feichai0017/loom-kernels/issues"
+Repository = "https://github.com/feichai0017/loom-kernels"
 
 [project.optional-dependencies]
 torch = ["torch>=2.4"]

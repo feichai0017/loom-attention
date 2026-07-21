@@ -49,7 +49,8 @@ import { evidence, repositoryUrl } from "../data/site";
         <li>PyTorch current-stream, mutation schema, and buffer-reuse tests.</li>
         <li><code>torch.compile</code> and CUDA Graph capture/replay.</li>
         <li>Named vLLM comparison with forward and reverse provider order.</li>
-        <li>Real engine and end-to-end workload gates, tracked separately.</li>
+        <li>Pinned real-model invocation and exact-token generation.</li>
+        <li>Serving-scale TTFT, TPOT, memory, and goodput, tracked separately.</li>
       </ol>
 
       <h2>Reproduce</h2>
@@ -57,7 +58,18 @@ import { evidence, repositoryUrl } from "../data/site";
 python benchmarks/vllm_silu_and_mul_dynamic_fp8.py \
   --dtype bf16 --rows 8 --width 11008 --group-size 128 \
   --warmup 100 --iterations 2000 --samples 15 \
-  --provider-order forward</code></pre>
+  --provider-order forward
+
+.venv-vllm/bin/python benchmarks/vllm_engine_fp8_ab.py \
+  --model /path/to/Qwen2.5-0.5B-Instruct \
+  --case 1x128x128 --case 8x128x128 --case 32x128x64 \
+  --provider-order baseline-first</code></pre>
+      <p>
+        The pinned Qwen2.5 runs matched every generated token and recorded
+        direct Loom launches. Order-reversed batch-latency ratios were
+        0.999–1.004×, which is a neutral result rather than an acceleration
+        claim.
+      </p>
       <p>
         Machine-readable reports are versioned in{" "}
         <a href={`${repositoryUrl}/tree/main/docs/results`}>docs/results</a>.

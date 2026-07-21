@@ -19,6 +19,8 @@
 - FP16/BF16 SiLU-and-Mul fused directly into dynamic per-block FP8 E4M3FN,
   with groups 64/128, optional scale upper bound, and row/group-major scales;
 - a C++ PyTorch dispatcher bridge using the current CUDA stream;
+- a source-adapter Python wheel with explicit framework extras, project
+  metadata, license/readme payloads, and a CI install/entry-point smoke gate;
 - a `loom_cuda` vLLM IR provider with native fallback and an opt-in vLLM
   `SiluAndMul` out-of-tree layer replacement, plus an opt-in activation-quant
   fusion-table replacement for vLLM 0.24;
@@ -27,6 +29,8 @@
 ## Validated
 
 - local formatting, clippy, tests, and release build;
+- the Python adapter wheel built, installed into an isolated environment,
+  passed dependency checks, imported, and exposed its vLLM entry point;
 - CUDA-feature clippy on `forge-gas1`;
 - NVIDIA H20 correctness for six shapes from `1x1` through `16x8192` and a
   `64x4096` batch;
@@ -79,7 +83,7 @@
 - SiLU-and-Mul+block-FP8 matched vLLM's fused operator exactly for FP16/BF16,
   groups 64/128, representative and higher-rank inputs, row/group-major scale
   layouts, and optional scale upper bounds;
-- the complete H20 Python suite passed 61 tests; the 27 focused activation and
+- the complete H20 Python suite passed 62 tests; the 27 focused activation and
   vLLM tests also covered external streams, mutation schema/FakeTensor,
   `torch.compile`, auto-functionalization, CUDA Graph replay, and fusion-table
   registration; vLLM's official activation-quant pattern matcher rewrote the
@@ -90,6 +94,16 @@
   `1.216-1.231x` eager speedup ratios (`17.7-18.8%` lower latency) and
   `1.037-1.082x` CUDA Graph ratios (`3.6-7.5%` lower latency) against vLLM's
   semantically identical fused operator.
+- a pinned Qwen2.5-0.5B-Instruct checkpoint completed vLLM 0.24 online
+  `fp8_per_block` loading, compilation, activation-quant rewriting, CUDA Graph
+  capture, and repeated generation through Loom on H20;
+- baseline-first and Loom-first runs matched every generated token ID across
+  `1x128x128`, `8x128x128`, and `32x128x64` request shapes; both providers
+  recorded two compiler-pattern matches, while the process-local path probe
+  recorded zero Loom launches for the baseline and 1584 for Loom;
+- order-reversed end-to-end batch-latency ratios ranged from `0.9991x` to
+  `1.0043x`. This closes real-model invocation and correctness, but is parity
+  rather than evidence of model-level TTFT, TPOT, or throughput improvement.
 
 See the [F32 report](results/h20-rms-norm-f32-smoke-20260721.json) and
 [low-precision report](results/h20-rms-norm-low-precision-20260721.json), plus
@@ -102,14 +116,17 @@ records exact vLLM compatibility, graph parity, eager instability, and the
 engine smoke gate. The
 [SiLU-and-Mul+dynamic-block-FP8 report](results/h20-silu-and-mul-dynamic-fp8-20260721.json)
 records the fused contract, exact vLLM comparison, raw CUDA results, and
-order-reversed named baseline.
+order-reversed named baseline. The
+[Qwen2.5 FP8 engine report](results/h20-vllm-qwen25-05b-fp8-engine-20260722.json)
+records the pinned checkpoint, path-hit evidence, exact-token gates, and
+order-reversed end-to-end parity result.
 
 ## Not Yet Proven
 
 - fused Add+RMSNorm or RMSNorm+FP8 model-level benefit;
-- SiLU-and-Mul+FP8 invocation from a real FP8 model engine graph and its
-  model-level benefit;
+- SiLU-and-Mul+FP8 model-level benefit on a workload where the exposed
+  activation-quant boundary is material;
 - integration into SGLang or a Rust-native engine path;
-- production pretrained-model and serving-workload validation;
+- larger production-model and serving-workload validation;
 - automated binary-wheel packaging;
 - end-to-end TTFT, TPOT, throughput, or memory improvement.

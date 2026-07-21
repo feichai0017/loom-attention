@@ -65,8 +65,17 @@ LOOM_KERNELS_ENABLE_SILU_AND_MUL=1 python your_service.py
 LOOM_KERNELS_ENABLE_SILU_AND_MUL_FP8=1 python your_service.py</code></pre>
       <p>
         The block-FP8 replacement covers dynamic symmetric groups 64 and 128.
-        Its compiler rewrite and operator evidence are closed; a real quantized
-        model engine gate is still open.
+        A pinned Qwen2.5-0.5B online-FP8 run now closes compiler path-hit,
+        exact-token, CUDA Graph, and real-model invocation gates. End-to-end
+        latency remains at parity, so no model-level speedup is claimed.
+      </p>
+
+      <h2>Graph-visible boundary</h2>
+      <p>
+        vLLM's automatic H20 path folds activation quantization into its
+        FlashInfer/DeepGEMM GEMM. Loom only applies when quantization remains a
+        graph node. The qualified A/B fixes the Cutlass linear backend for both
+        providers, keeping GEMM constant while swapping only SiLU plus FP8.
       </p>
 
       <h2>Compatibility contract</h2>

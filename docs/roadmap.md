@@ -18,7 +18,8 @@ Status: in progress.
    vLLM bitwise/performance gates complete; INT8 remains planned;
 4. ~~named vLLM baseline and engine integration~~ — IR provider, compilation,
    CUDA Graph, and synthetic-Qwen2 generate-loop gates complete;
-5. source packaging and a production model/workload gate.
+5. ~~source-adapter wheel metadata and isolated-install smoke gate~~; automated
+   CUDA/LibTorch binary wheels and a production model/workload gate remain.
 
 Exit: one fused path improves a real decode workload, not only a microbenchmark.
 
@@ -30,7 +31,9 @@ Status: in progress.
    vLLM layer override, and H20 compatibility gates complete;
 2. ~~SiLU-and-Mul plus dynamic per-block FP8 output quantization~~ — groups
    64/128, exact vLLM compatibility, compiler-fusion registration, and H20
-   named-baseline gates complete; a real FP8-model engine gate remains open;
+   named-baseline gates complete; pinned Qwen2.5 online-FP8 compilation,
+   path-hit, CUDA Graph, exact-token, and order-reversed engine gates are also
+   complete, while the measured 0.5B end-to-end result remains at parity;
 3. dynamic INT8 output quantization when a named model path requires it;
 4. GELU/GELU-tanh and gated variants admitted by model coverage;
 5. vendor GEMM integration with bias, activation, and quantization epilogues.

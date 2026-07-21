@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/library.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -12,6 +13,8 @@
 #include <string>
 
 namespace {
+
+std::atomic<int64_t> vllm_silu_and_mul_per_block_fp8_launches{0};
 
 bool byte_ranges_overlap(const at::Tensor& left, const at::Tensor& right) {
   const auto left_begin = reinterpret_cast<uintptr_t>(left.data_ptr());
@@ -364,6 +367,18 @@ void vllm_silu_and_mul_per_block_fp8(
   }
   launch_silu_and_mul_dynamic_fp8_layout(input, output, scales, group_size,
                                          scale_ub, scales_transposed);
+  vllm_silu_and_mul_per_block_fp8_launches.fetch_add(
+      1, std::memory_order_relaxed);
+}
+
+int64_t vllm_silu_and_mul_per_block_fp8_launch_count() {
+  return vllm_silu_and_mul_per_block_fp8_launches.load(
+      std::memory_order_relaxed);
+}
+
+void reset_vllm_silu_and_mul_per_block_fp8_launch_count() {
+  vllm_silu_and_mul_per_block_fp8_launches.store(0,
+                                                 std::memory_order_relaxed);
 }
 
 }  // namespace
@@ -395,6 +410,10 @@ TORCH_LIBRARY(loom_kernels, library) {
       "silu_and_mul_per_block_fp8(Tensor(a!) out, Tensor input, "
       "Tensor(b!) scales, int group_size, Tensor? scale_ub=None, "
       "bool is_scale_transposed=False) -> ()");
+  library.def("vllm_silu_and_mul_per_block_fp8_launch_count() -> int",
+              &vllm_silu_and_mul_per_block_fp8_launch_count);
+  library.def("reset_vllm_silu_and_mul_per_block_fp8_launch_count() -> ()",
+              &reset_vllm_silu_and_mul_per_block_fp8_launch_count);
 }
 
 TORCH_LIBRARY_IMPL(loom_kernels, CUDA, library) {

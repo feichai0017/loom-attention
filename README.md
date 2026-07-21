@@ -29,7 +29,9 @@ execution, or lower dispatch overhead can create measurable engine value.
   engine-valid, but graph latency is at parity, so no speedup is claimed;
 - an opt-in vLLM 0.24 activation-quant fusion replacement covers dynamic
   symmetric FP8 groups 64/128 and is bitwise compatible with vLLM's fused
-  kernel; a real FP8 model engine run remains open;
+  kernel; pinned Qwen2.5-0.5B online-FP8 runs now prove compiler path hits,
+  CUDA Graph execution, and exact generation parity, while end-to-end latency
+  remains at parity;
 - RMSNorm+FP8 is bitwise compatible with vLLM's named CUDA baseline; routing it
   through a real engine graph is the remaining integration gate.
 
@@ -159,6 +161,11 @@ PYTHONPATH=python/src python3 benchmarks/vllm_silu_and_mul.py \
 PYTHONPATH=python/src python3 benchmarks/vllm_silu_and_mul_dynamic_fp8.py \
   --dtype bf16 --rows 8 --width 11008 --group-size 128 \
   --warmup 100 --iterations 2000 --samples 15
+
+.venv-vllm/bin/python benchmarks/vllm_engine_fp8_ab.py \
+  --model /path/to/Qwen2.5-0.5B-Instruct \
+  --case 1x128x128 --case 8x128x128 --case 32x128x64 \
+  --provider-order baseline-first --result-json /tmp/loom-fp8-ab.json
 ```
 
 The H20 reports cover
@@ -172,11 +179,16 @@ and the
 [SiLU-and-Mul compatibility gate](docs/results/h20-silu-and-mul-20260721.json),
 plus the
 [fused SiLU-and-Mul+block-FP8 gate](docs/results/h20-silu-and-mul-dynamic-fp8-20260721.json).
+The
+[Qwen2.5 FP8 engine gate](docs/results/h20-vllm-qwen25-05b-fp8-engine-20260722.json)
+records the pinned real checkpoint, compiler matches, direct Loom launch
+evidence, exact generated tokens, and order-reversed end-to-end measurements.
 The fused operator is faster than `vllm_c` in the qualified microbenchmark;
 the real engine run proves integration but does not show a measurable
 end-to-end speedup. Standalone SiLU-and-Mul is graph-parity coverage. Its
-activation-plus-FP8 boundary now has an order-stable operator-level advantage,
-but still needs a real quantized-model engine gate.
+activation-plus-FP8 boundary has an order-stable operator-level advantage and
+a real-model correctness gate, but still needs a workload with measurable
+model-level benefit.
 
 For the Python build and engine configuration, see the
 [vLLM IR provider guide](docs/guides/vllm-ir-provider.md).

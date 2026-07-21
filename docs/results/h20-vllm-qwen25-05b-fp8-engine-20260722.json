@@ -1,0 +1,128 @@
+{
+  "project": "loom-kernels",
+  "benchmark": "vllm_real_model_fp8_ab",
+  "date": "2026-07-22",
+  "model": {
+    "name": "Qwen/Qwen2.5-0.5B-Instruct",
+    "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+    "model_safetensors_sha256": "fdf756fa7fcbe7404d5c60e26bff1a0c8b8aa1f72ced49e7dd0210fe288fb7fe",
+    "source_dtype": "BF16",
+    "parameter_count": "0.49B"
+  },
+  "environment": {
+    "host": "forge-gas1",
+    "gpu": "NVIDIA H20",
+    "compute_capability": "9.0",
+    "driver": "535.161.08",
+    "cuda_compiler": "13.1",
+    "torch": "2.11.0+cu130",
+    "torch_cuda": "13.0",
+    "vllm": "0.24.0",
+    "adapter_backend": "cpp-dispatch"
+  },
+  "configuration": {
+    "weight_quantization": "vLLM online fp8_per_block",
+    "activation_quantization": "dynamic symmetric FP8 E4M3FN, group size 128",
+    "linear_backend": "cutlass",
+    "custom_ops": ["+quant_fp8"],
+    "compiler_pass": "fuse_act_quant=true",
+    "sampling": "greedy, temperature=0, ignore_eos=true",
+    "warmups_per_case": 2,
+    "samples_per_case": 7,
+    "gpu_memory_utilization": 0.5,
+    "provider_isolation": "fresh process and distinct vLLM, TorchInductor, and Triton cache roots per provider",
+    "backend_reason": "H20's auto-selected FlashInfer/DeepGEMM kernel consumes BF16 and performs activation quantization inside GEMM, so it exposes no replaceable SiLU-plus-quant graph node. Cutlass keeps that node visible and holds the GEMM constant across providers."
+  },
+  "acceptance": {
+    "baseline_first": "passed",
+    "loom_first": "passed",
+    "all_generated_token_ids_match": true,
+    "baseline_uses_native_fusion": true,
+    "loom_fusion_registered_before_engine": true,
+    "activation_quant_fusion_matches_per_provider": 2,
+    "providers_matched_same_graph": true,
+    "baseline_loom_host_launch_count": 0,
+    "loom_host_launch_count": 1584,
+    "python_suite": "62 passed"
+  },
+  "runs": [
+    {
+      "provider_order": ["vllm", "loom"],
+      "cases": [
+        {
+          "case": "batch=1,input=128,output=128",
+          "vllm_batch_latency_median_ms": 198.9475041627884,
+          "loom_batch_latency_median_ms": 198.086965829134,
+          "baseline_over_loom_batch_latency": 1.0043442451150304,
+          "vllm_ttft_median_ms": 6.167411804199219,
+          "loom_ttft_median_ms": 5.956172943115234,
+          "baseline_over_loom_tpot": 1.00271006575503,
+          "token_ids_match": true
+        },
+        {
+          "case": "batch=8,input=128,output=128",
+          "vllm_batch_latency_median_ms": 387.61695101857185,
+          "loom_batch_latency_median_ms": 386.05906814336777,
+          "baseline_over_loom_batch_latency": 1.0040353484835784,
+          "vllm_ttft_median_ms": 14.08839225769043,
+          "loom_ttft_median_ms": 13.332605361938477,
+          "baseline_over_loom_tpot": 1.0018711836673115,
+          "token_ids_match": true
+        },
+        {
+          "case": "batch=32,input=128,output=64",
+          "vllm_batch_latency_median_ms": 206.59248903393745,
+          "loom_batch_latency_median_ms": 206.08069002628326,
+          "baseline_over_loom_batch_latency": 1.0024834884218843,
+          "vllm_ttft_median_ms": 16.463398933410645,
+          "loom_ttft_median_ms": 16.402244567871094,
+          "baseline_over_loom_tpot": 1.001233317592334,
+          "token_ids_match": true
+        }
+      ]
+    },
+    {
+      "provider_order": ["loom", "vllm"],
+      "cases": [
+        {
+          "case": "batch=1,input=128,output=128",
+          "vllm_batch_latency_median_ms": 198.54316860437393,
+          "loom_batch_latency_median_ms": 198.40571656823158,
+          "baseline_over_loom_batch_latency": 1.0006927826401366,
+          "vllm_ttft_median_ms": 6.242990493774414,
+          "loom_ttft_median_ms": 5.819082260131836,
+          "baseline_over_loom_tpot": 0.9984559865041153,
+          "token_ids_match": true
+        },
+        {
+          "case": "batch=8,input=128,output=128",
+          "vllm_batch_latency_median_ms": 386.84726879000664,
+          "loom_batch_latency_median_ms": 386.50592416524887,
+          "baseline_over_loom_batch_latency": 1.000883154961971,
+          "vllm_ttft_median_ms": 13.751626014709473,
+          "loom_ttft_median_ms": 13.384342193603516,
+          "baseline_over_loom_tpot": 1.0000405264124685,
+          "token_ids_match": true
+        },
+        {
+          "case": "batch=32,input=128,output=64",
+          "vllm_batch_latency_median_ms": 206.65935426950455,
+          "loom_batch_latency_median_ms": 206.84923976659775,
+          "baseline_over_loom_batch_latency": 0.9990820101765544,
+          "vllm_ttft_median_ms": 16.533732414245605,
+          "loom_ttft_median_ms": 16.582012176513672,
+          "baseline_over_loom_tpot": 0.9991140964793661,
+          "token_ids_match": true
+        }
+      ]
+    }
+  ],
+  "interpretation": {
+    "integration": "A pinned pretrained checkpoint completed online FP8 loading, vLLM compilation, activation-quant pattern replacement, CUDA Graph capture, and repeated generation through Loom.",
+    "correctness": "Every generated token ID matched vLLM's native fused operator in both provider orders and all three workloads.",
+    "performance": "Batch-latency ratios ranged from 0.9991x to 1.0043x. This is effectively parity for this small model and run protocol; no stable model-level TTFT, TPOT, or throughput improvement is claimed.",
+    "scope": "This closes the real-model invocation and correctness gate for the Cutlass block-FP8 graph boundary. It does not replace the H20 default FlashInfer/DeepGEMM path and does not yet prove serving-level value."
+  },
+  "reproducer": "benchmarks/vllm_engine_fp8_ab.py",
+  "claim": "Loom's fused SiLU-and-Mul plus dynamic block-FP8 operator is a real vLLM 0.24 model-graph provider with exact generation parity and direct path-hit evidence on H20. The 0.5B end-to-end result is neutral, so model-level acceleration remains open."
+}

@@ -78,4 +78,10 @@ export const evidence = [
     result: "1.037–1.082×",
     detail: "CUDA Graph ratio vs vLLM fused",
   },
+  {
+    operator: "Qwen2.5 FP8 engine",
+    shape: "0.5B · batches 1 / 8 / 32",
+    result: "0.999–1.004×",
+    detail: "Exact-token path hit; end-to-end parity",
+  },
 ];

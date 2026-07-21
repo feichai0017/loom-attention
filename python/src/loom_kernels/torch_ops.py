@@ -551,6 +551,27 @@ def silu_and_mul_dynamic_fp8_unchecked_custom_op():
     return _silu_and_mul_dynamic_fp8_unchecked
 
 
+def vllm_silu_and_mul_per_block_fp8_launch_count() -> int:
+    """Return host submissions through vLLM's Loom activation-FP8 boundary.
+
+    CUDA Graph replay does not return to the host dispatcher, so this counter
+    proves that Loom participated in graph construction or eager execution; it
+    is not a count of graph replays.
+    """
+    if _EXTENSION_PATH is None:
+        raise RuntimeError("launch telemetry requires the C++ dispatcher bridge")
+    return int(
+        torch.ops.loom_kernels.vllm_silu_and_mul_per_block_fp8_launch_count()
+    )
+
+
+def reset_vllm_silu_and_mul_per_block_fp8_launch_count() -> None:
+    """Reset host-side activation-FP8 launch telemetry."""
+    if _EXTENSION_PATH is None:
+        raise RuntimeError("launch telemetry requires the C++ dispatcher bridge")
+    torch.ops.loom_kernels.reset_vllm_silu_and_mul_per_block_fp8_launch_count()
+
+
 def adapter_backend() -> str:
     """Return the active dispatcher bridge implementation."""
     return _ADAPTER_BACKEND
@@ -564,6 +585,7 @@ __all__ = [
     "mutable_custom_op",
     "rms_norm_dynamic_fp8",
     "rms_norm_dynamic_fp8_out",
+    "reset_vllm_silu_and_mul_per_block_fp8_launch_count",
     "silu_and_mul",
     "silu_and_mul_custom_op",
     "silu_and_mul_dynamic_fp8",
@@ -576,4 +598,5 @@ __all__ = [
     "supports_silu_and_mul",
     "supports_silu_and_mul_dynamic_fp8",
     "supports_vllm_add_rms_norm",
+    "vllm_silu_and_mul_per_block_fp8_launch_count",
 ]
