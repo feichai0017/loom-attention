@@ -18,12 +18,16 @@
 - handwritten SiLU-and-Mul with aligned 16-byte packs and scalar fallback;
 - FP16/BF16 SiLU-and-Mul fused directly into dynamic per-block FP8 E4M3FN,
   with groups 64/128, optional scale upper bound, and row/group-major scales;
+- NeoX and interleaved RoPE contracts, partial rotary dimensions, and a fused
+  RoPE+paged-KV write oracle for native NHD/HND cache layouts;
+- F32/FP16/BF16 fused CUDA with explicit packed-QKV token/head strides,
+  independent rotation/cache token counts, and strided paged-cache writes;
 - a C++ PyTorch dispatcher bridge using the current CUDA stream;
 - a source-adapter Python wheel with explicit framework extras, project
   metadata, license/readme payloads, and a CI install/entry-point smoke gate;
 - a `loom_cuda` vLLM IR provider with native fallback and an opt-in vLLM
   `SiluAndMul` out-of-tree layer replacement, plus an opt-in activation-quant
-  fusion-table replacement for vLLM 0.24;
+  fusion-table replacement and RoPE+KV compiler-pass adapter for vLLM 0.24;
 - per-operator JSON correctness/latency benchmarks and named vLLM baselines.
 
 ## Validated
@@ -104,6 +108,23 @@
 - order-reversed end-to-end batch-latency ratios ranged from `0.9991x` to
   `1.0043x`. This closes real-model invocation and correctness, but is parity
   rather than evidence of model-level TTFT, TPOT, or throughput improvement.
+- fused RoPE+paged-KV matched vLLM's separate rotary and
+  `reshape_and_cache_flash` operations across F32/FP16/BF16, NeoX/interleaved,
+  NHD/HND cache layouts, partial RoPE, negative slots, external streams,
+  packed-QKV views, and padded tensors with a shorter slot mapping;
+- the complete H20 Python suite passed 77 tests; the Rust workspace passed 21
+  contract/oracle tests, Clippy, formatting, and a CUDA-feature safe-wrapper
+  test against the CPU oracle;
+- on H20 BF16 Qwen2.5-style shapes, the fused dispatcher path measured roughly
+  `2.30-2.40x` faster than vLLM's two-op path for 1-512 tokens. Ratios narrowed
+  to `1.686x`, `1.240x`, `1.145x`, and `1.088x` at 1024, 2048, 4096, and 8192
+  tokens respectively, confirming that this is a decode-oriented fusion;
+- isolated baseline-first and Loom-first Qwen2.5-0.5B engine runs matched every
+  generated token for `1x32x64` and `8x32x64`. The launch probe recorded zero
+  Loom submissions in baseline processes and 552 in Loom processes;
+- order-reversed engine batch-latency ratios ranged from `0.9957x` to
+  `1.0180x`. Invocation and correctness are proven, but the end-to-end result
+  crosses parity with provider order and does not establish a speedup.
 
 See the [F32 report](results/h20-rms-norm-f32-smoke-20260721.json) and
 [low-precision report](results/h20-rms-norm-low-precision-20260721.json), plus
@@ -120,12 +141,19 @@ order-reversed named baseline. The
 [Qwen2.5 FP8 engine report](results/h20-vllm-qwen25-05b-fp8-engine-20260722.json)
 records the pinned checkpoint, path-hit evidence, exact-token gates, and
 order-reversed end-to-end parity result.
+The [RoPE+paged-KV report](results/h20-rope-paged-kv-20260722.json),
+[large-token sweep](results/h20-rope-paged-kv-large-20260722.json), and
+[Qwen2.5 engine gate](results/h20-vllm-qwen25-rope-paged-kv-engine-20260722.json)
+separate operator-level benefit from real-engine invocation and end-to-end
+parity.
 
 ## Not Yet Proven
 
 - fused Add+RMSNorm or RMSNorm+FP8 model-level benefit;
 - SiLU-and-Mul+FP8 model-level benefit on a workload where the exposed
   activation-quant boundary is material;
+- RoPE+paged-KV model-level TTFT/TPOT or throughput benefit beyond the current
+  exact-token engine integration gate;
 - integration into SGLang or a Rust-native engine path;
 - larger production-model and serving-workload validation;
 - automated binary-wheel packaging;

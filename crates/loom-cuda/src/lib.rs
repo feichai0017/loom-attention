@@ -9,6 +9,8 @@ use thiserror::Error;
 #[cfg(feature = "cuda")]
 mod rms_norm;
 #[cfg(feature = "cuda")]
+mod rope_paged_kv;
+#[cfg(feature = "cuda")]
 pub mod runtime;
 #[cfg(feature = "cuda")]
 mod silu_and_mul;

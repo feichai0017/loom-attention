@@ -43,9 +43,12 @@ improves a real model workload. Standalone SiLU parity alone does not close it.
 
 ## K3: KV-Cache Update Family
 
-Status: planned.
+Status: in progress.
 
-- RoPE plus paged-KV write;
+- ~~RoPE plus paged-KV write~~ — Rust/CUDA/PyTorch, packed-QKV and NHD/HND
+  layouts, vLLM compiler fusion, H20 named baseline, and exact-token Qwen2.5
+  engine gates complete; operator benefit is measurable, model-level benefit
+  remains open;
 - append/copy with layout conversion;
 - FP8/INT8 quantize and dequantize;
 - gather/scatter for paged cache movement.

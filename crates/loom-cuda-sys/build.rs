@@ -15,6 +15,7 @@ fn main() {
     let add_rms_norm_source = cuda_dir.join("src/add_rms_norm.cu");
     let silu_and_mul_source = cuda_dir.join("src/silu_and_mul.cu");
     let silu_and_mul_quant_source = cuda_dir.join("src/silu_and_mul_quant.cu");
+    let rope_paged_kv_source = cuda_dir.join("src/rope_paged_kv.cu");
     println!("cargo:rerun-if-changed={}", header.display());
     println!("cargo:rerun-if-changed={}", rms_norm_source.display());
     println!("cargo:rerun-if-changed={}", rms_norm_quant_source.display());
@@ -24,6 +25,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         silu_and_mul_quant_source.display()
     );
+    println!("cargo:rerun-if-changed={}", rope_paged_kv_source.display());
 
     if env::var_os("CARGO_FEATURE_CUDA").is_none() {
         return;
@@ -53,6 +55,7 @@ fn main() {
         .file(&add_rms_norm_source)
         .file(&silu_and_mul_source)
         .file(&silu_and_mul_quant_source)
+        .file(&rope_paged_kv_source)
         .flag("-O3")
         .flag("-Xcompiler=-fPIC")
         .flag("-std=c++17")

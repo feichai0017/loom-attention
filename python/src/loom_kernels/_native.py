@@ -139,6 +139,48 @@ def _load() -> ctypes.CDLL:
             function = getattr(library, name)
             function.argtypes = silu_and_mul_dynamic_fp8_arguments
             function.restype = ctypes.c_int
+        rope_paged_kv_arguments = [
+            pointer,
+            pointer,
+            pointer,
+            pointer,
+            pointer,
+            pointer,
+            pointer,
+            pointer,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint32,
+            pointer,
+        ]
+        for name in (
+            "loom_cuda_rope_paged_kv_write_f32",
+            "loom_cuda_rope_paged_kv_write_f16",
+            "loom_cuda_rope_paged_kv_write_bf16",
+        ):
+            function = getattr(library, name)
+            function.argtypes = rope_paged_kv_arguments
+            function.restype = ctypes.c_int
         library.loom_cuda_status_string.argtypes = [ctypes.c_int]
         library.loom_cuda_status_string.restype = ctypes.c_char_p
         _LIBRARY = library
@@ -295,5 +337,80 @@ def launch_silu_and_mul_dynamic_fp8(
         message = raw_message.decode("utf-8") if raw_message else "unknown status"
         raise NativeLibraryError(
             "Loom CUDA SiLU-and-Mul+FP8 launch failed with status "
+            f"{status}: {message}"
+        )
+
+
+def launch_rope_paged_kv_write(
+    dtype: str,
+    query_pointer: int,
+    key_pointer: int,
+    value_pointer: int,
+    positions_pointer: int,
+    cos_sin_cache_pointer: int,
+    key_cache_pointer: int,
+    value_cache_pointer: int,
+    slot_mapping_pointer: int,
+    tokens: int,
+    cache_tokens: int,
+    query_heads: int,
+    kv_heads: int,
+    head_size: int,
+    value_head_size: int,
+    rotary_dim: int,
+    max_position: int,
+    num_blocks: int,
+    block_size: int,
+    query_strides: tuple[int, int],
+    key_strides: tuple[int, int],
+    value_strides: tuple[int, int],
+    key_cache_strides: tuple[int, int, int],
+    value_cache_strides: tuple[int, int, int],
+    is_neox: bool,
+    stream_pointer: int,
+) -> None:
+    """Submit fused RoPE plus a strided paged K/V write."""
+    function_name = {
+        "f32": "loom_cuda_rope_paged_kv_write_f32",
+        "f16": "loom_cuda_rope_paged_kv_write_f16",
+        "bf16": "loom_cuda_rope_paged_kv_write_bf16",
+    }.get(dtype)
+    if function_name is None:
+        raise NativeLibraryError(f"unsupported native dtype: {dtype}")
+
+    library = _load()
+    function = getattr(library, function_name)
+    status = function(
+        ctypes.c_void_p(query_pointer),
+        ctypes.c_void_p(key_pointer),
+        ctypes.c_void_p(value_pointer),
+        ctypes.c_void_p(positions_pointer),
+        ctypes.c_void_p(cos_sin_cache_pointer),
+        ctypes.c_void_p(key_cache_pointer),
+        ctypes.c_void_p(value_cache_pointer),
+        ctypes.c_void_p(slot_mapping_pointer),
+        tokens,
+        cache_tokens,
+        query_heads,
+        kv_heads,
+        head_size,
+        value_head_size,
+        rotary_dim,
+        max_position,
+        num_blocks,
+        block_size,
+        *query_strides,
+        *key_strides,
+        *value_strides,
+        *key_cache_strides,
+        *value_cache_strides,
+        int(is_neox),
+        ctypes.c_void_p(stream_pointer),
+    )
+    if status != 0:
+        raw_message = library.loom_cuda_status_string(status)
+        message = raw_message.decode("utf-8") if raw_message else "unknown status"
+        raise NativeLibraryError(
+            "Loom CUDA RoPE+paged-KV launch failed with status "
             f"{status}: {message}"
         )

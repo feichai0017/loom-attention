@@ -104,6 +104,60 @@ int loom_cuda_silu_and_mul_dynamic_fp8_bf16(
     uint32_t width, uint32_t group_size, const float* scale_ub,
     uint32_t scales_transposed, void* stream);
 
+// Fused in-place RoPE and paged K/V cache write. Query, key, and value have
+// logical [tokens, heads, dim] dimensions, a unit dim stride, and explicit
+// token/head element strides so packed-QKV views do not need materialization.
+// The cosine/sine cache is contiguous [max_position, rotary_dim], with cosine
+// then sine halves. Key/value cache tensors have logical
+// [blocks, block_size, kv_heads, dim] dimensions; their element strides make
+// both vLLM NHD and HND physical layouts expressible. cache_tokens may be less
+// than tokens when the engine pads Q/K/V but not slot_mapping. Negative slots
+// skip the cache write while RoPE still updates Q/K. Positions and non-negative
+// slots are trusted engine metadata and must be in range.
+int loom_cuda_rope_paged_kv_write_f32(
+    float* query, float* key, const float* value, const int64_t* positions,
+    const float* cos_sin_cache, float* key_cache, float* value_cache,
+    const int64_t* slot_mapping, uint32_t tokens, uint32_t cache_tokens,
+    uint32_t query_heads, uint32_t kv_heads, uint32_t head_size,
+    uint32_t value_head_size, uint32_t rotary_dim, uint32_t max_position,
+    uint32_t num_blocks, uint32_t block_size, uint64_t query_token_stride,
+    uint64_t query_head_stride, uint64_t key_token_stride,
+    uint64_t key_head_stride, uint64_t value_token_stride,
+    uint64_t value_head_stride, uint64_t key_cache_block_stride,
+    uint64_t key_cache_page_stride, uint64_t key_cache_head_stride,
+    uint64_t value_cache_block_stride, uint64_t value_cache_page_stride,
+    uint64_t value_cache_head_stride, uint32_t is_neox, void* stream);
+
+int loom_cuda_rope_paged_kv_write_f16(
+    uint16_t* query, uint16_t* key, const uint16_t* value,
+    const int64_t* positions, const uint16_t* cos_sin_cache,
+    uint16_t* key_cache, uint16_t* value_cache,
+    const int64_t* slot_mapping, uint32_t tokens, uint32_t cache_tokens,
+    uint32_t query_heads, uint32_t kv_heads, uint32_t head_size,
+    uint32_t value_head_size, uint32_t rotary_dim, uint32_t max_position,
+    uint32_t num_blocks, uint32_t block_size, uint64_t query_token_stride,
+    uint64_t query_head_stride, uint64_t key_token_stride,
+    uint64_t key_head_stride, uint64_t value_token_stride,
+    uint64_t value_head_stride, uint64_t key_cache_block_stride,
+    uint64_t key_cache_page_stride, uint64_t key_cache_head_stride,
+    uint64_t value_cache_block_stride, uint64_t value_cache_page_stride,
+    uint64_t value_cache_head_stride, uint32_t is_neox, void* stream);
+
+int loom_cuda_rope_paged_kv_write_bf16(
+    uint16_t* query, uint16_t* key, const uint16_t* value,
+    const int64_t* positions, const uint16_t* cos_sin_cache,
+    uint16_t* key_cache, uint16_t* value_cache,
+    const int64_t* slot_mapping, uint32_t tokens, uint32_t cache_tokens,
+    uint32_t query_heads, uint32_t kv_heads, uint32_t head_size,
+    uint32_t value_head_size, uint32_t rotary_dim, uint32_t max_position,
+    uint32_t num_blocks, uint32_t block_size, uint64_t query_token_stride,
+    uint64_t query_head_stride, uint64_t key_token_stride,
+    uint64_t key_head_stride, uint64_t value_token_stride,
+    uint64_t value_head_stride, uint64_t key_cache_block_stride,
+    uint64_t key_cache_page_stride, uint64_t key_cache_head_stride,
+    uint64_t value_cache_block_stride, uint64_t value_cache_page_stride,
+    uint64_t value_cache_head_stride, uint32_t is_neox, void* stream);
+
 #ifdef __cplusplus
 }
 #endif

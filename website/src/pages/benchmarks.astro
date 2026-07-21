@@ -40,6 +40,8 @@ import { evidence, repositoryUrl } from "../data/site";
         SiLU-and-Mul plus block FP8, the order-reversed CUDA Graph ratio of
         1.037–1.082 corresponds to 3.6–7.5% lower operator latency. Loom and the
         fused vLLM baseline had zero output-byte, scale, or dequantized mismatch.
+        RoPE+paged-KV reaches 2.30–2.40× against vLLM's two separate dispatcher
+        calls at 1–512 tokens, then narrows toward parity for long prefill.
       </p>
 
       <h2>Validation ladder</h2>
@@ -63,12 +65,23 @@ python benchmarks/vllm_silu_and_mul_dynamic_fp8.py \
 .venv-vllm/bin/python benchmarks/vllm_engine_fp8_ab.py \
   --model /path/to/Qwen2.5-0.5B-Instruct \
   --case 1x128x128 --case 8x128x128 --case 32x128x64 \
+  --provider-order baseline-first
+
+.venv-vllm/bin/python benchmarks/vllm_engine_rope_paged_kv.py \
+  --model /path/to/Qwen2.5-0.5B-Instruct \
+  --case 1x32x64 --case 8x32x64 \
   --provider-order baseline-first</code></pre>
       <p>
         The pinned Qwen2.5 runs matched every generated token and recorded
         direct Loom launches. Order-reversed batch-latency ratios were
         0.999–1.004×, which is a neutral result rather than an acceleration
         claim.
+      </p>
+      <p>
+        The RoPE+KV real-model A/B also matched every token and recorded 552
+        Loom host launches only on the fused side. Its order-reversed ratios
+        span 0.996–1.018×, so the current value is a proven engine boundary and
+        decode-sized operator win—not a model-level acceleration claim.
       </p>
       <p>
         Machine-readable reports are versioned in{" "}

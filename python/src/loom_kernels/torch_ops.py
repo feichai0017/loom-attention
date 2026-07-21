@@ -9,6 +9,7 @@ import torch
 from ._native import (
     launch_add_rms_norm,
     launch_rms_norm_dynamic_fp8,
+    launch_rope_paged_kv_write,
     launch_silu_and_mul,
     launch_silu_and_mul_dynamic_fp8,
 )
@@ -120,6 +121,77 @@ def supports_silu_and_mul_dynamic_fp8(
         and group_size in (64, 128)
         and width % group_size == 0
         and input_tensor.is_contiguous()
+    )
+
+
+def supports_rope_paged_kv_write(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> bool:
+    """Return whether tensors match the native-cache RoPE+paged-write ABI."""
+    if query.dim() != 3 or key.dim() != 3 or value.dim() != 3:
+        return False
+    if query.numel() == 0 or key.numel() == 0 or value.numel() == 0:
+        return False
+    if cos_sin_cache.dim() != 2:
+        return False
+    rotary_dim = cos_sin_cache.shape[1]
+    return bool(
+        query.device.type == "cuda"
+        and key.device == query.device
+        and value.device == query.device
+        and positions.device == query.device
+        and cos_sin_cache.device == query.device
+        and key_cache.device == query.device
+        and value_cache.device == query.device
+        and slot_mapping.device == query.device
+        and query.dtype in _DTYPE_NAMES
+        and key.dtype == query.dtype
+        and value.dtype == query.dtype
+        and cos_sin_cache.dtype == query.dtype
+        and key_cache.dtype == query.dtype
+        and value_cache.dtype == query.dtype
+        and positions.dtype == torch.int64
+        and slot_mapping.dtype == torch.int64
+        and query.shape[0] == key.shape[0] == value.shape[0]
+        and query.shape[2] == key.shape[2]
+        and key.shape[1] == value.shape[1]
+        and value.shape[2] > 0
+        and positions.dim() == 1
+        and positions.numel() == query.shape[0]
+        and slot_mapping.dim() == 1
+        and slot_mapping.numel() <= query.shape[0]
+        and cos_sin_cache.shape[0] > 0
+        and rotary_dim > 0
+        and rotary_dim % 2 == 0
+        and rotary_dim <= query.shape[2]
+        and key_cache.dim() == 4
+        and value_cache.dim() == 4
+        and key_cache.shape[0] > 0
+        and key_cache.shape[1] > 0
+        and key_cache.shape[2:] == key.shape[1:]
+        and value_cache.shape[:3]
+        == (key_cache.shape[0], key_cache.shape[1], value.shape[1])
+        and value_cache.shape[3] == value.shape[2]
+        and query.stride(2) == 1
+        and key.stride(2) == 1
+        and value.stride(2) == 1
+        and all(stride > 0 for stride in query.stride()[:2])
+        and all(stride > 0 for stride in key.stride()[:2])
+        and all(stride > 0 for stride in value.stride()[:2])
+        and positions.is_contiguous()
+        and cos_sin_cache.is_contiguous()
+        and slot_mapping.is_contiguous()
+        and key_cache.stride(3) == 1
+        and value_cache.stride(3) == 1
+        and all(stride > 0 for stride in key_cache.stride()[:3])
+        and all(stride > 0 for stride in value_cache.stride()[:3])
     )
 
 
@@ -289,6 +361,69 @@ def _validate_silu_and_mul_dynamic_fp8_buffers(
     return dtype, rows, width
 
 
+def _validate_rope_paged_kv_write(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> tuple[
+    str,
+    tuple[int, ...],
+    tuple[int, int],
+    tuple[int, int],
+    tuple[int, int],
+    tuple[int, int, int],
+    tuple[int, int, int],
+]:
+    if not supports_rope_paged_kv_write(
+        query,
+        key,
+        value,
+        positions,
+        cos_sin_cache,
+        key_cache,
+        value_cache,
+        slot_mapping,
+    ):
+        raise ValueError(
+            "Loom RoPE+paged-KV requires unit-dim-stride rank-3 native Q/K/V, "
+            "int64 metadata, a contiguous cosine/sine cache, and logical "
+            "[blocks, block_size, kv_heads, dim] cache views with unit dim stride"
+        )
+    if any(
+        tensor.requires_grad for tensor in (query, key, value, cos_sin_cache)
+    ):
+        raise ValueError("Loom RoPE+paged-KV is an inference-only operator")
+
+    dimensions = (
+        query.shape[0],
+        slot_mapping.numel(),
+        query.shape[1],
+        key.shape[1],
+        query.shape[2],
+        value.shape[2],
+        cos_sin_cache.shape[1],
+        cos_sin_cache.shape[0],
+        key_cache.shape[0],
+        key_cache.shape[1],
+    )
+    if any(dimension > 0xFFFF_FFFF for dimension in dimensions):
+        raise ValueError("tensor shape exceeds the Loom CUDA ABI")
+    return (
+        _DTYPE_NAMES[query.dtype],
+        dimensions,
+        tuple(query.stride()[:2]),
+        tuple(key.stride()[:2]),
+        tuple(value.stride()[:2]),
+        tuple(key_cache.stride()[:3]),
+        tuple(value_cache.stride()[:3]),
+    )
+
+
 _EXTENSION_PATH = load_torch_extension()
 
 if _EXTENSION_PATH is None:
@@ -407,11 +542,73 @@ if _EXTENSION_PATH is None:
                 stream.cuda_stream,
             )
 
+    @torch.library.custom_op(
+        "loom_kernels::rope_paged_kv_write_",
+        mutates_args={"query", "key", "key_cache", "value_cache"},
+        device_types="cuda",
+    )
+    def _rope_paged_kv_write(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        is_neox: bool,
+    ) -> None:
+        (
+            dtype,
+            dimensions,
+            query_strides,
+            key_strides,
+            value_strides,
+            key_cache_strides,
+            value_cache_strides,
+        ) = (
+            _validate_rope_paged_kv_write(
+                query,
+                key,
+                value,
+                positions,
+                cos_sin_cache,
+                key_cache,
+                value_cache,
+                slot_mapping,
+            )
+        )
+        device_index = query.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        with torch.cuda.device(device_index):
+            stream = torch.cuda.current_stream(device_index)
+            launch_rope_paged_kv_write(
+                dtype,
+                query.data_ptr(),
+                key.data_ptr(),
+                value.data_ptr(),
+                positions.data_ptr(),
+                cos_sin_cache.data_ptr(),
+                key_cache.data_ptr(),
+                value_cache.data_ptr(),
+                slot_mapping.data_ptr(),
+                *dimensions,
+                query_strides,
+                key_strides,
+                value_strides,
+                key_cache_strides,
+                value_cache_strides,
+                is_neox,
+                stream.cuda_stream,
+            )
+
     _ADAPTER_BACKEND = "python-ctypes"
     _add_rms_norm_mut_unchecked = _add_rms_norm_mut
     _rms_norm_dynamic_fp8_unchecked = _rms_norm_dynamic_fp8
     _silu_and_mul_unchecked = _silu_and_mul
     _silu_and_mul_dynamic_fp8_unchecked = _silu_and_mul_dynamic_fp8
+    _rope_paged_kv_write_unchecked = _rope_paged_kv_write
 else:
     _add_rms_norm_mut = torch.ops.loom_kernels.add_rms_norm_mut.default
     _add_rms_norm_mut_unchecked = (
@@ -428,6 +625,10 @@ else:
     )
     _silu_and_mul_dynamic_fp8_unchecked = (
         torch.ops.loom_kernels.silu_and_mul_dynamic_fp8_unchecked.default
+    )
+    _rope_paged_kv_write = torch.ops.loom_kernels.rope_paged_kv_write_.default
+    _rope_paged_kv_write_unchecked = (
+        torch.ops.loom_kernels.rope_paged_kv_write_unchecked_.default
     )
     _ADAPTER_BACKEND = "cpp-dispatch"
 
@@ -521,6 +722,32 @@ def silu_and_mul_dynamic_fp8(
     )
 
 
+def rope_paged_kv_write_(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    is_neox: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Rotate Q/K in place and scatter rotated K plus V into paged caches."""
+    _rope_paged_kv_write(
+        query,
+        key,
+        value,
+        positions,
+        cos_sin_cache,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        bool(is_neox),
+    )
+    return query, key, key_cache, value_cache
+
+
 def mutable_custom_op():
     """Expose the registered op definition for torch.library.opcheck."""
     return _add_rms_norm_mut
@@ -551,6 +778,16 @@ def silu_and_mul_dynamic_fp8_unchecked_custom_op():
     return _silu_and_mul_dynamic_fp8_unchecked
 
 
+def rope_paged_kv_write_custom_op():
+    """Expose checked fused RoPE+paged-KV for dispatcher validation."""
+    return _rope_paged_kv_write
+
+
+def rope_paged_kv_write_unchecked_custom_op():
+    """Expose the hot-path fused RoPE+paged-KV dispatcher implementation."""
+    return _rope_paged_kv_write_unchecked
+
+
 def vllm_silu_and_mul_per_block_fp8_launch_count() -> int:
     """Return host submissions through vLLM's Loom activation-FP8 boundary.
 
@@ -572,6 +809,24 @@ def reset_vllm_silu_and_mul_per_block_fp8_launch_count() -> None:
     torch.ops.loom_kernels.reset_vllm_silu_and_mul_per_block_fp8_launch_count()
 
 
+def rope_paged_kv_write_launch_count() -> int:
+    """Return host submissions through Loom's fused RoPE+paged-KV op.
+
+    CUDA Graph replay does not return to the host dispatcher, so this proves
+    graph construction or eager execution rather than counting graph replays.
+    """
+    if _EXTENSION_PATH is None:
+        raise RuntimeError("launch telemetry requires the C++ dispatcher bridge")
+    return int(torch.ops.loom_kernels.rope_paged_kv_write_launch_count())
+
+
+def reset_rope_paged_kv_write_launch_count() -> None:
+    """Reset host-side RoPE+paged-KV launch telemetry."""
+    if _EXTENSION_PATH is None:
+        raise RuntimeError("launch telemetry requires the C++ dispatcher bridge")
+    torch.ops.loom_kernels.reset_rope_paged_kv_write_launch_count()
+
+
 def adapter_backend() -> str:
     """Return the active dispatcher bridge implementation."""
     return _ADAPTER_BACKEND
@@ -585,6 +840,11 @@ __all__ = [
     "mutable_custom_op",
     "rms_norm_dynamic_fp8",
     "rms_norm_dynamic_fp8_out",
+    "rope_paged_kv_write_",
+    "rope_paged_kv_write_custom_op",
+    "rope_paged_kv_write_launch_count",
+    "rope_paged_kv_write_unchecked_custom_op",
+    "reset_rope_paged_kv_write_launch_count",
     "reset_vllm_silu_and_mul_per_block_fp8_launch_count",
     "silu_and_mul",
     "silu_and_mul_custom_op",
@@ -595,6 +855,7 @@ __all__ = [
     "silu_and_mul_out",
     "supports_add_rms_norm",
     "supports_rms_norm_dynamic_fp8",
+    "supports_rope_paged_kv_write",
     "supports_silu_and_mul",
     "supports_silu_and_mul_dynamic_fp8",
     "supports_vllm_add_rms_norm",

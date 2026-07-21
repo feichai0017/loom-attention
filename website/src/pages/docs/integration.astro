@@ -70,6 +70,25 @@ LOOM_KERNELS_ENABLE_SILU_AND_MUL_FP8=1 python your_service.py</code></pre>
         latency remains at parity, so no model-level speedup is claimed.
       </p>
 
+      <h2>vLLM RoPE + paged-KV fusion</h2>
+      <pre><code>from vllm import LLM
+from loom_kernels.vllm import configure_vllm_rope_paged_kv
+
+engine = LLM(
+    model="/path/to/model",
+    compilation_config=configure_vllm_rope_paged_kv(
+        max_token_num=256,
+    ),
+)</code></pre>
+      <p>
+        The vLLM 0.24 adapter preserves packed-QKV and NHD/HND strides, uses
+        native F32/FP16/BF16 cache storage, and declines quantized caches. The
+        256-token default focuses the pass on decode-sized batches where the
+        qualified operator result is material. Real Qwen2.5 exact-token and
+        path-hit gates pass; end-to-end latency still crosses parity by run
+        order.
+      </p>
+
       <h2>Graph-visible boundary</h2>
       <p>
         vLLM's automatic H20 path folds activation quantization into its

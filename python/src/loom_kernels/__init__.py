@@ -28,6 +28,13 @@ def rms_norm_dynamic_fp8_out(*args: Any, **kwargs: Any) -> Any:
     return implementation(*args, **kwargs)
 
 
+def rope_paged_kv_write_(*args: Any, **kwargs: Any) -> Any:
+    """Lazily execute fused in-place RoPE plus paged K/V cache write."""
+    from .torch_ops import rope_paged_kv_write_ as implementation
+
+    return implementation(*args, **kwargs)
+
+
 def silu_and_mul(*args: Any, **kwargs: Any) -> Any:
     """Lazily execute fused split-half SiLU-and-Mul."""
     from .torch_ops import silu_and_mul as implementation
@@ -61,6 +68,7 @@ __all__ = [
     "add_rms_norm_",
     "rms_norm_dynamic_fp8",
     "rms_norm_dynamic_fp8_out",
+    "rope_paged_kv_write_",
     "silu_and_mul",
     "silu_and_mul_dynamic_fp8",
     "silu_and_mul_dynamic_fp8_out",

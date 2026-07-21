@@ -38,13 +38,15 @@ export const supportedOperators = [
     boundary: "Activation + group-64/128 quantization",
     status: "supported",
   },
+  {
+    name: "RoPE + paged-KV write",
+    dtypes: "F32 · FP16 · BF16",
+    boundary: "Packed Q/K rotation + native cache write",
+    status: "supported",
+  },
 ];
 
 export const nextOperators = [
-  {
-    name: "RoPE + paged-KV write",
-    reason: "Remove an extra K pass at the cache boundary.",
-  },
   {
     name: "Decode-tail sampling",
     reason: "Fuse penalties, filtering, selection, and logprob work.",
@@ -83,5 +85,11 @@ export const evidence = [
     shape: "0.5B · batches 1 / 8 / 32",
     result: "0.999–1.004×",
     detail: "Exact-token path hit; end-to-end parity",
+  },
+  {
+    operator: "RoPE + paged-KV write",
+    shape: "BF16 · Qwen2.5-style · 1–512 tokens",
+    result: "2.30–2.40×",
+    detail: "Dispatcher ratio vs separate vLLM ops",
   },
 ];

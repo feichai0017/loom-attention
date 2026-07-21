@@ -17,6 +17,12 @@ advantage. It has also completed a pinned Qwen2.5 online-FP8 engine gate with
 direct compiler-match and launch evidence; that small-model end-to-end result
 is at parity rather than a demonstrated speedup.
 
+A third opt-in uses vLLM 0.24's existing RoPE+KV compiler fusion pass with
+Loom's CUDA implementation for FlashAttention and FlashInfer native caches.
+It preserves packed-QKV token/head strides, NHD or HND cache strides, negative
+slots, and the shorter slot mapping used with padded engine inputs. Quantized
+KV caches are deliberately declined.
+
 The registered contract is:
 
 ```text
@@ -59,6 +65,7 @@ output, updated_residual = add_rms_norm_(
 )
 
 from loom_kernels import (
+    rope_paged_kv_write_,
     silu_and_mul,
     silu_and_mul_dynamic_fp8,
     silu_and_mul_dynamic_fp8_out,
@@ -77,6 +84,18 @@ silu_and_mul_dynamic_fp8_out(
     reusable_fp8_output,
     reusable_block_scales,
     group_size=128,
+)
+
+rope_paged_kv_write_(
+    query,
+    key,
+    value,
+    positions,
+    cos_sin_cache,
+    key_cache,
+    value_cache,
+    slot_mapping,
+    is_neox=True,
 )
 ```
 
@@ -129,6 +148,26 @@ replacement uses vLLM's mutable custom-op schema, including an optional F32
 scale upper bound and row-major or transposed scale storage. Registration is
 intentionally version-specific to vLLM 0.24's activation-quant compiler pass;
 unsupported versions should leave the opt-in unset.
+
+To enable fused RoPE+paged-KV on vLLM 0.24 CUDA, configure the compilation
+object before constructing the engine:
+
+```python
+from vllm import LLM
+from loom_kernels.vllm import configure_vllm_rope_paged_kv
+
+engine = LLM(
+    model="/path/to/model",
+    compilation_config=configure_vllm_rope_paged_kv(max_token_num=256),
+)
+```
+
+The helper explicitly enables `+rotary_embedding`, keeps the cache update in
+the compiled graph, registers Loom on the FlashAttention/FlashInfer backend
+classes, and enables fusion only through 256 tokens by default. The threshold
+is intentional: the H20 advantage is largest for decode-sized batches and
+narrows as long prefill becomes compute-bound. The adapter targets vLLM 0.24's
+version-specific compiler contract and native F32/FP16/BF16 cache dtype.
 
 The provider can only replace a graph-visible activation-quant boundary. On
 the tested H20 stack, vLLM's automatic `fp8_per_block` selection uses a
@@ -184,6 +223,22 @@ PY
   --case 1x128x128 --case 8x128x128 --case 32x128x64 \
   --warmup 2 --repeats 7 --provider-order loom-first \
   --result-json /tmp/qwen25-fp8-loom-first.json
+
+.venv-vllm/bin/python benchmarks/vllm_rope_paged_kv.py \
+  --dtype bf16 --layout NHD --tokens 1,8,32,128,256,512 \
+  --warmup 100 --iterations 2000 --repeats 5
+
+.venv-vllm/bin/python benchmarks/vllm_engine_rope_paged_kv.py \
+  --model /path/to/Qwen2.5-0.5B-Instruct \
+  --case 1x32x64 --case 8x32x64 --warmup 2 --repeats 5 \
+  --provider-order baseline-first \
+  --result-json /tmp/qwen25-rope-kv-baseline-first.json
+
+.venv-vllm/bin/python benchmarks/vllm_engine_rope_paged_kv.py \
+  --model /path/to/Qwen2.5-0.5B-Instruct \
+  --case 1x32x64 --case 8x32x64 --warmup 2 --repeats 5 \
+  --provider-order loom-first \
+  --result-json /tmp/qwen25-rope-kv-loom-first.json
 ```
 
 The microbenchmark compares `loom_cuda` and `vllm_c` through the same vLLM IR
@@ -224,6 +279,19 @@ is integration and correctness evidence rather than a model-level performance
 claim. See the
 [H20 Qwen2.5 engine report](../results/h20-vllm-qwen25-05b-fp8-engine-20260722.json).
 
+For RoPE+paged-KV, FP16/BF16 results were bitwise equal to vLLM's separate
+rotary and cache-write operators across packed-QKV, padding, partial rotary,
+NHD/HND, and both pairing styles; F32 remained within the qualified tolerance.
+BF16 Qwen2.5-style dispatcher ratios were roughly `2.30-2.40x` for 1-512
+tokens, then narrowed to `1.088x` at 8192 tokens. Two provider orders on the
+real Qwen2.5-0.5B engine matched every generated token and recorded 552 Loom
+host submissions only in Loom processes. End-to-end batch-latency ratios
+ranged from `0.9957x` to `1.0180x`, so the correct conclusion is engine
+integration plus operator-level benefit, not model-level acceleration. See the
+[operator report](../results/h20-rope-paged-kv-20260722.json),
+[large-token sweep](../results/h20-rope-paged-kv-large-20260722.json), and
+[engine report](../results/h20-vllm-qwen25-rope-paged-kv-engine-20260722.json).
+
 The compatible arithmetic and schema follow vLLM 0.24's
 [fused CUDA implementation](https://github.com/vllm-project/vllm/blob/v0.24.0/csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu)
 and its documented
@@ -241,8 +309,10 @@ dispatcher bridge follows PyTorch's
 - inference-only mutation, with no autograd implementation;
 - one selectable IR provider (`fused_add_rms_norm`), one opt-in out-of-tree
   layer replacement (`SiluAndMul`), and one vLLM-version-specific
-  activation-quant fusion-table replacement;
+  activation-quant fusion-table replacement, plus a vLLM 0.24-specific
+  RoPE+native-KV compiler-pass adapter;
 - the activation-quant provider requires a graph-visible quantization boundary;
   it does not intercept vLLM's fused BF16-input FlashInfer/DeepGEMM path;
 - the isolated operator is faster on H20 and real-model invocation is proven,
-  but no model-level speedup has been established.
+  but no model-level speedup has been established for either FP8 activation
+  fusion or RoPE+paged-KV.

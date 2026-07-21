@@ -49,8 +49,8 @@ valuable epilogues, and evidence around it.
 
 | Operator | Priority | State | Intended fusion boundary |
 | --- | --- | --- | --- |
-| NeoX and interleaved RoPE, partial rotary dimensions | P0 | next | in-place Q/K position encoding |
-| RoPE+paged-KV write | P0 | next | position encoding without materializing another K pass |
+| NeoX and interleaved RoPE, partial rotary dimensions | P0 | next | in-place Q/K position encoding; currently exposed through the fused cache-write path |
+| RoPE+paged-KV write | P0 | supported | position encoding without materializing another K pass |
 | paged-KV reshape/store/append | P0 | planned | engine tensor to cache layout |
 | KV block copy, swap, gather, scatter, compact, and remap | P0 | planned | cache movement and prefix reuse |
 | FP8/INT8 KV quantize/dequantize with scale update | P0 | planned | compressed cache read/write |
@@ -110,13 +110,13 @@ the boundary or an isolated implementation is measurably useful.
 
 ## Implementation Order
 
-1. Close the real-model gate for SiLU-and-Mul+FP8, then add INT8 only for a
-   named engine/model consumer.
-2. Implement RoPE and fuse it with paged-KV writes.
-3. Close the decode tail with penalties, top-k/top-p, sampling, and selected
+1. Optimize the real-engine RoPE+paged-KV boundary only where profiling shows
+   TPOT materiality; keep its current parity result explicit.
+2. Close the decode tail with penalties, top-k/top-p, sampling, and selected
    logprob.
-4. Add MoE routing/movement before attempting a full grouped-GEMM stack.
-5. Add paged decode attention against engine-owned cache contracts.
+3. Add MoE routing/movement before attempting a full grouped-GEMM stack.
+4. Add paged decode attention against engine-owned cache contracts.
+5. Add INT8 fused boundaries only for a named engine/model consumer.
 6. Attempt communication-aware fusion only after single-GPU operators and
    real tensor-parallel workloads are reproducible.
 

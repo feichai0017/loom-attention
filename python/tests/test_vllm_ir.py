@@ -9,13 +9,38 @@ from loom_kernels.vllm import (
     ACT_QUANT_OVERRIDE_ENV,
     ACT_QUANT_OVERRIDE_KEY,
     DEFAULT_PROVIDER,
+    ROPE_PAGED_KV_OVERRIDE_KEY,
     SILU_OVERRIDE_ENV,
     SILU_OVERRIDE_KEY,
+    configure_vllm_rope_paged_kv,
     provider_metadata,
     register_vllm_ir,
+    register_vllm_rope_paged_kv,
     register_vllm_silu_and_mul,
     register_vllm_silu_and_mul_dynamic_fp8,
 )
+
+
+def test_configures_vllm_rope_paged_kv_fusion():
+    from vllm.config import CompilationConfig
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+    from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+
+    assert register_vllm_rope_paged_kv() == ROPE_PAGED_KV_OVERRIDE_KEY
+    config = configure_vllm_rope_paged_kv(max_token_num=128)
+
+    assert isinstance(config, CompilationConfig)
+    assert config.pass_config.fuse_rope_kvcache is True
+    assert config.pass_config.rope_kvcache_fusion_max_token_num == 128
+    assert config.splitting_ops == []
+    assert "+rotary_embedding" in config.custom_ops
+    assert FlashAttentionImpl.fused_rope_kvcache_supported.__module__ == (
+        "loom_kernels.vllm"
+    )
+    assert FlashInferImpl.fused_rope_kvcache_supported.__module__ == (
+        "loom_kernels.vllm"
+    )
+    assert provider_metadata()["rope_paged_kv_override"] is True
 
 
 def test_registers_inplace_fused_add_rms_norm_provider():

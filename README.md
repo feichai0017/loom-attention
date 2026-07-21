@@ -32,6 +32,10 @@ execution, or lower dispatch overhead can create measurable engine value.
   kernel; pinned Qwen2.5-0.5B online-FP8 runs now prove compiler path hits,
   CUDA Graph execution, and exact generation parity, while end-to-end latency
   remains at parity;
+- NeoX/interleaved RoPE and fused RoPE+paged-KV write now span Rust contracts,
+  CPU oracles, safe Rust/C ABI, handwritten F32/FP16/BF16 CUDA, PyTorch, and an
+  opt-in vLLM 0.24 FlashAttention/FlashInfer integration. Packed-QKV source
+  strides plus NHD/HND cache strides are preserved without materialization;
 - RMSNorm+FP8 is bitwise compatible with vLLM's named CUDA baseline; routing it
   through a real engine graph is the remaining integration gate.
 
@@ -166,6 +170,15 @@ PYTHONPATH=python/src python3 benchmarks/vllm_silu_and_mul_dynamic_fp8.py \
   --model /path/to/Qwen2.5-0.5B-Instruct \
   --case 1x128x128 --case 8x128x128 --case 32x128x64 \
   --provider-order baseline-first --result-json /tmp/loom-fp8-ab.json
+
+PYTHONPATH=python/src .venv-vllm/bin/python benchmarks/vllm_rope_paged_kv.py \
+  --dtype bf16 --layout NHD --tokens 1,8,32,128,256,512 \
+  --warmup 100 --iterations 2000 --repeats 5
+
+.venv-vllm/bin/python benchmarks/vllm_engine_rope_paged_kv.py \
+  --model /path/to/Qwen2.5-0.5B-Instruct \
+  --case 1x32x64 --case 8x32x64 --warmup 2 --repeats 5 \
+  --provider-order baseline-first --result-json /tmp/loom-rope-kv-ab.json
 ```
 
 The H20 reports cover
@@ -189,6 +202,15 @@ end-to-end speedup. Standalone SiLU-and-Mul is graph-parity coverage. Its
 activation-plus-FP8 boundary has an order-stable operator-level advantage and
 a real-model correctness gate, but still needs a workload with measurable
 model-level benefit.
+
+The RoPE+paged-KV
+[operator report](docs/results/h20-rope-paged-kv-20260722.json) records roughly
+`2.30-2.40x` lower dispatcher latency than vLLM's separate RoPE and cache-write
+ops for 1-512 tokens; the advantage narrows to `1.09x` at 8192 tokens in the
+[large-token report](docs/results/h20-rope-paged-kv-large-20260722.json). The
+[real Qwen2.5 engine gate](docs/results/h20-vllm-qwen25-rope-paged-kv-engine-20260722.json)
+proves exact tokens and direct Loom launches. Order reversal moves end-to-end
+ratios across parity, so no model-level speedup is claimed yet.
 
 For the Python build and engine configuration, see the
 [vLLM IR provider guide](docs/guides/vllm-ir-provider.md).

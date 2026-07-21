@@ -15,6 +15,7 @@
 namespace {
 
 std::atomic<int64_t> vllm_silu_and_mul_per_block_fp8_launches{0};
+std::atomic<int64_t> rope_paged_kv_write_launches{0};
 
 bool byte_ranges_overlap(const at::Tensor& left, const at::Tensor& right) {
   const auto left_begin = reinterpret_cast<uintptr_t>(left.data_ptr());
@@ -381,6 +382,210 @@ void reset_vllm_silu_and_mul_per_block_fp8_launch_count() {
                                                  std::memory_order_relaxed);
 }
 
+int64_t rope_paged_kv_write_launch_count() {
+  return rope_paged_kv_write_launches.load(std::memory_order_relaxed);
+}
+
+void reset_rope_paged_kv_write_launch_count() {
+  rope_paged_kv_write_launches.store(0, std::memory_order_relaxed);
+}
+
+void check_rope_paged_kv_write_contract(
+    const at::Tensor& query, const at::Tensor& key, const at::Tensor& value,
+    const at::Tensor& positions, const at::Tensor& cos_sin_cache,
+    const at::Tensor& key_cache, const at::Tensor& value_cache,
+    const at::Tensor& slot_mapping) {
+  TORCH_CHECK(query.is_cuda(), "Loom RoPE+paged-KV query must be CUDA");
+  TORCH_CHECK(key.device() == query.device() &&
+                  value.device() == query.device() &&
+                  positions.device() == query.device() &&
+                  cos_sin_cache.device() == query.device() &&
+                  key_cache.device() == query.device() &&
+                  value_cache.device() == query.device() &&
+                  slot_mapping.device() == query.device(),
+              "Loom RoPE+paged-KV tensors must be on one CUDA device");
+  TORCH_CHECK(query.scalar_type() == key.scalar_type() &&
+                  query.scalar_type() == value.scalar_type() &&
+                  query.scalar_type() == cos_sin_cache.scalar_type() &&
+                  query.scalar_type() == key_cache.scalar_type() &&
+                  query.scalar_type() == value_cache.scalar_type(),
+              "Loom RoPE+paged-KV data and native caches must share a dtype");
+  TORCH_CHECK(query.scalar_type() == at::kFloat ||
+                  query.scalar_type() == at::kHalf ||
+                  query.scalar_type() == at::kBFloat16,
+              "Loom RoPE+paged-KV supports F32, FP16, and BF16 native caches");
+  TORCH_CHECK(positions.scalar_type() == at::kLong &&
+                  slot_mapping.scalar_type() == at::kLong,
+              "Loom RoPE+paged-KV positions and slot mapping must be int64");
+  TORCH_CHECK(query.dim() == 3 && key.dim() == 3 && value.dim() == 3,
+              "Loom RoPE+paged-KV Q/K/V must have rank 3");
+  TORCH_CHECK(query.size(0) > 0 && query.size(1) > 0 && query.size(2) > 0,
+              "Loom RoPE+paged-KV query must be non-empty");
+  TORCH_CHECK(key.size(0) == query.size(0) &&
+                  value.size(0) == query.size(0),
+              "Loom RoPE+paged-KV Q/K/V token counts must match");
+  TORCH_CHECK(key.size(1) > 0 && key.size(1) == value.size(1),
+              "Loom RoPE+paged-KV K/V head counts must match");
+  TORCH_CHECK(key.size(2) == query.size(2),
+              "Loom RoPE+paged-KV Q/K head sizes must match");
+  TORCH_CHECK(value.size(2) > 0,
+              "Loom RoPE+paged-KV value head size must be positive");
+  TORCH_CHECK(query.stride(2) == 1 && key.stride(2) == 1 &&
+                  value.stride(2) == 1 && query.stride(0) > 0 &&
+                  query.stride(1) > 0 && key.stride(0) > 0 &&
+                  key.stride(1) > 0 && value.stride(0) > 0 &&
+                  value.stride(1) > 0 && positions.is_contiguous() &&
+                  cos_sin_cache.is_contiguous() &&
+                  slot_mapping.is_contiguous(),
+              "Loom RoPE+paged-KV sources require unit dim stride and positive "
+              "token/head strides; metadata must be contiguous");
+  TORCH_CHECK(positions.dim() == 1 &&
+                  positions.numel() == query.size(0) &&
+                  slot_mapping.dim() == 1 &&
+                  slot_mapping.numel() <= query.size(0),
+              "Loom RoPE positions must cover every token and slot_mapping "
+              "must not exceed the padded token count");
+  TORCH_CHECK(cos_sin_cache.dim() == 2 && cos_sin_cache.size(0) > 0 &&
+                  cos_sin_cache.size(1) > 0 &&
+                  cos_sin_cache.size(1) % 2 == 0 &&
+                  cos_sin_cache.size(1) <= query.size(2),
+              "Loom RoPE+paged-KV cos/sin cache must be "
+              "[max_position, even rotary_dim <= head_size]");
+  TORCH_CHECK(key_cache.dim() == 4 && value_cache.dim() == 4,
+              "Loom paged K/V cache views must have rank 4");
+  TORCH_CHECK(key_cache.size(0) > 0 && key_cache.size(1) > 0 &&
+                  key_cache.size(2) == key.size(1) &&
+                  key_cache.size(3) == key.size(2),
+              "Loom key cache must have logical shape "
+              "[blocks, block_size, kv_heads, head_size]");
+  TORCH_CHECK(value_cache.size(0) == key_cache.size(0) &&
+                  value_cache.size(1) == key_cache.size(1) &&
+                  value_cache.size(2) == value.size(1) &&
+                  value_cache.size(3) == value.size(2),
+              "Loom value cache must have logical shape "
+              "[blocks, block_size, kv_heads, value_head_size]");
+  TORCH_CHECK(key_cache.stride(3) == 1 && value_cache.stride(3) == 1 &&
+                  key_cache.stride(0) > 0 && key_cache.stride(1) > 0 &&
+                  key_cache.stride(2) > 0 && value_cache.stride(0) > 0 &&
+                  value_cache.stride(1) > 0 && value_cache.stride(2) > 0,
+              "Loom paged K/V caches require unit dim stride and positive "
+              "block/page/head strides");
+  TORCH_CHECK(!query.requires_grad() && !key.requires_grad() &&
+                  !value.requires_grad() && !cos_sin_cache.requires_grad(),
+              "Loom RoPE+paged-KV is an inference-only operator");
+}
+
+void launch_rope_paged_kv_write(
+    at::Tensor query, at::Tensor key, const at::Tensor& value,
+    const at::Tensor& positions, const at::Tensor& cos_sin_cache,
+    at::Tensor key_cache, at::Tensor value_cache,
+    const at::Tensor& slot_mapping, bool is_neox) {
+  const int64_t limits[] = {
+      query.size(0),       query.size(1),       key.size(1),
+      query.size(2),       value.size(2),       cos_sin_cache.size(1),
+      cos_sin_cache.size(0), key_cache.size(0), key_cache.size(1),
+  };
+  for (const int64_t value_to_check : limits) {
+    TORCH_CHECK(value_to_check > 0 &&
+                    value_to_check <= std::numeric_limits<uint32_t>::max(),
+                "Loom RoPE+paged-KV shape exceeds the CUDA ABI");
+  }
+
+  const c10::cuda::CUDAGuard device_guard(query.device());
+  const auto stream = at::cuda::getCurrentCUDAStream(query.device().index());
+  const auto tokens = static_cast<uint32_t>(query.size(0));
+  const auto cache_tokens = static_cast<uint32_t>(slot_mapping.numel());
+  const auto query_heads = static_cast<uint32_t>(query.size(1));
+  const auto kv_heads = static_cast<uint32_t>(key.size(1));
+  const auto head_size = static_cast<uint32_t>(query.size(2));
+  const auto value_head_size = static_cast<uint32_t>(value.size(2));
+  const auto rotary_dim = static_cast<uint32_t>(cos_sin_cache.size(1));
+  const auto max_position = static_cast<uint32_t>(cos_sin_cache.size(0));
+  const auto num_blocks = static_cast<uint32_t>(key_cache.size(0));
+  const auto block_size = static_cast<uint32_t>(key_cache.size(1));
+  const auto query_token_stride = static_cast<uint64_t>(query.stride(0));
+  const auto query_head_stride = static_cast<uint64_t>(query.stride(1));
+  const auto key_token_stride = static_cast<uint64_t>(key.stride(0));
+  const auto key_head_stride = static_cast<uint64_t>(key.stride(1));
+  const auto value_token_stride = static_cast<uint64_t>(value.stride(0));
+  const auto value_head_stride = static_cast<uint64_t>(value.stride(1));
+  const auto key_block_stride = static_cast<uint64_t>(key_cache.stride(0));
+  const auto key_page_stride = static_cast<uint64_t>(key_cache.stride(1));
+  const auto key_cache_head_stride =
+      static_cast<uint64_t>(key_cache.stride(2));
+  const auto value_block_stride =
+      static_cast<uint64_t>(value_cache.stride(0));
+  const auto value_page_stride =
+      static_cast<uint64_t>(value_cache.stride(1));
+  const auto value_cache_head_stride =
+      static_cast<uint64_t>(value_cache.stride(2));
+
+  int status = LOOM_CUDA_UNSUPPORTED;
+  if (query.scalar_type() == at::kFloat) {
+    status = loom_cuda_rope_paged_kv_write_f32(
+        query.data_ptr<float>(), key.data_ptr<float>(), value.data_ptr<float>(),
+        positions.data_ptr<int64_t>(), cos_sin_cache.data_ptr<float>(),
+        key_cache.data_ptr<float>(), value_cache.data_ptr<float>(),
+        slot_mapping.data_ptr<int64_t>(), tokens, cache_tokens, query_heads,
+        kv_heads, head_size, value_head_size, rotary_dim, max_position,
+        num_blocks, block_size, query_token_stride, query_head_stride,
+        key_token_stride, key_head_stride, value_token_stride,
+        value_head_stride, key_block_stride, key_page_stride,
+        key_cache_head_stride, value_block_stride, value_page_stride,
+        value_cache_head_stride, is_neox ? 1U : 0U, stream.stream());
+  } else if (query.scalar_type() == at::kHalf) {
+    status = loom_cuda_rope_paged_kv_write_f16(
+        reinterpret_cast<uint16_t*>(query.data_ptr<at::Half>()),
+        reinterpret_cast<uint16_t*>(key.data_ptr<at::Half>()),
+        reinterpret_cast<const uint16_t*>(value.data_ptr<at::Half>()),
+        positions.data_ptr<int64_t>(),
+        reinterpret_cast<const uint16_t*>(
+            cos_sin_cache.data_ptr<at::Half>()),
+        reinterpret_cast<uint16_t*>(key_cache.data_ptr<at::Half>()),
+        reinterpret_cast<uint16_t*>(value_cache.data_ptr<at::Half>()),
+        slot_mapping.data_ptr<int64_t>(), tokens, cache_tokens, query_heads,
+        kv_heads, head_size, value_head_size, rotary_dim, max_position,
+        num_blocks, block_size, query_token_stride, query_head_stride,
+        key_token_stride, key_head_stride, value_token_stride,
+        value_head_stride, key_block_stride, key_page_stride,
+        key_cache_head_stride, value_block_stride, value_page_stride,
+        value_cache_head_stride, is_neox ? 1U : 0U, stream.stream());
+  } else if (query.scalar_type() == at::kBFloat16) {
+    status = loom_cuda_rope_paged_kv_write_bf16(
+        reinterpret_cast<uint16_t*>(query.data_ptr<at::BFloat16>()),
+        reinterpret_cast<uint16_t*>(key.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const uint16_t*>(value.data_ptr<at::BFloat16>()),
+        positions.data_ptr<int64_t>(),
+        reinterpret_cast<const uint16_t*>(
+            cos_sin_cache.data_ptr<at::BFloat16>()),
+        reinterpret_cast<uint16_t*>(key_cache.data_ptr<at::BFloat16>()),
+        reinterpret_cast<uint16_t*>(value_cache.data_ptr<at::BFloat16>()),
+        slot_mapping.data_ptr<int64_t>(), tokens, cache_tokens, query_heads,
+        kv_heads, head_size, value_head_size, rotary_dim, max_position,
+        num_blocks, block_size, query_token_stride, query_head_stride,
+        key_token_stride, key_head_stride, value_token_stride,
+        value_head_stride, key_block_stride, key_page_stride,
+        key_cache_head_stride, value_block_stride, value_page_stride,
+        value_cache_head_stride, is_neox ? 1U : 0U, stream.stream());
+  }
+  TORCH_CHECK(status == LOOM_CUDA_SUCCESS,
+              "Loom CUDA RoPE+paged-KV launch failed: ",
+              loom_cuda_status_string(status), " (status ", status, ")");
+  rope_paged_kv_write_launches.fetch_add(1, std::memory_order_relaxed);
+}
+
+void rope_paged_kv_write(
+    at::Tensor query, at::Tensor key, const at::Tensor& value,
+    const at::Tensor& positions, const at::Tensor& cos_sin_cache,
+    at::Tensor key_cache, at::Tensor value_cache,
+    const at::Tensor& slot_mapping, bool is_neox) {
+  check_rope_paged_kv_write_contract(query, key, value, positions,
+                                     cos_sin_cache, key_cache, value_cache,
+                                     slot_mapping);
+  launch_rope_paged_kv_write(query, key, value, positions, cos_sin_cache,
+                             key_cache, value_cache, slot_mapping, is_neox);
+}
+
 }  // namespace
 
 TORCH_LIBRARY(loom_kernels, library) {
@@ -414,6 +619,19 @@ TORCH_LIBRARY(loom_kernels, library) {
               &vllm_silu_and_mul_per_block_fp8_launch_count);
   library.def("reset_vllm_silu_and_mul_per_block_fp8_launch_count() -> ()",
               &reset_vllm_silu_and_mul_per_block_fp8_launch_count);
+  library.def("rope_paged_kv_write_launch_count() -> int",
+              &rope_paged_kv_write_launch_count);
+  library.def("reset_rope_paged_kv_write_launch_count() -> ()",
+              &reset_rope_paged_kv_write_launch_count);
+  library.def(
+      "rope_paged_kv_write_(Tensor(a!) query, Tensor(b!) key, Tensor value, "
+      "Tensor positions, Tensor cos_sin_cache, Tensor(c!) key_cache, "
+      "Tensor(d!) value_cache, Tensor slot_mapping, bool is_neox) -> ()");
+  library.def(
+      "rope_paged_kv_write_unchecked_(Tensor(a!) query, Tensor(b!) key, "
+      "Tensor value, Tensor positions, Tensor cos_sin_cache, "
+      "Tensor(c!) key_cache, Tensor(d!) value_cache, Tensor slot_mapping, "
+      "bool is_neox) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(loom_kernels, CUDA, library) {
@@ -429,4 +647,7 @@ TORCH_LIBRARY_IMPL(loom_kernels, CUDA, library) {
                &launch_silu_and_mul_dynamic_fp8);
   library.impl("silu_and_mul_per_block_fp8",
                &vllm_silu_and_mul_per_block_fp8);
+  library.impl("rope_paged_kv_write_", &rope_paged_kv_write);
+  library.impl("rope_paged_kv_write_unchecked_",
+               &launch_rope_paged_kv_write);
 }
