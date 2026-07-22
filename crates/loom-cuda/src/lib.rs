@@ -2,7 +2,8 @@
 //!
 //! CUDA is opt-in so the default workspace remains buildable on machines
 //! without an NVIDIA toolkit. Enabling `cuda` compiles the handwritten kernels
-//! and exposes owned streams, buffers, events, and checked operator entrypoints.
+//! and exposes owned or borrowed streams and device memory, events, and checked
+//! operator entrypoints.
 
 use thiserror::Error;
 

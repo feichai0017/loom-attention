@@ -1,22 +1,22 @@
 use crate::rms_norm::CudaBackend;
-use crate::runtime::{loom_status_result, DeviceBuffer};
+use crate::runtime::{loom_status_result, CudaDeviceRead, CudaDeviceWrite, CudaStreamHandle};
 use crate::CudaExecutorError;
 use half::{bf16, f16};
 use loom_kernels::{DType, RopePagedKvWriteSpec, RotaryStyle};
 
-impl CudaBackend {
+impl<S: CudaStreamHandle> CudaBackend<S> {
     /// Applies F32 RoPE in place and writes K/V to contiguous NHD caches.
     #[allow(clippy::too_many_arguments)]
     pub fn rope_paged_kv_write_f32(
         &self,
-        query: &mut DeviceBuffer<f32>,
-        key: &mut DeviceBuffer<f32>,
-        value: &DeviceBuffer<f32>,
-        positions: &DeviceBuffer<i64>,
-        cos_sin_cache: &DeviceBuffer<f32>,
-        key_cache: &mut DeviceBuffer<f32>,
-        value_cache: &mut DeviceBuffer<f32>,
-        slot_mapping: &DeviceBuffer<i64>,
+        query: &mut impl CudaDeviceWrite<f32>,
+        key: &mut impl CudaDeviceWrite<f32>,
+        value: &impl CudaDeviceRead<f32>,
+        positions: &impl CudaDeviceRead<i64>,
+        cos_sin_cache: &impl CudaDeviceRead<f32>,
+        key_cache: &mut impl CudaDeviceWrite<f32>,
+        value_cache: &mut impl CudaDeviceWrite<f32>,
+        slot_mapping: &impl CudaDeviceRead<i64>,
         spec: RopePagedKvWriteSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F32)?;
@@ -64,7 +64,7 @@ impl CudaBackend {
                 shape.value_page_stride,
                 shape.value_head_stride,
                 shape.is_neox,
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -73,14 +73,14 @@ impl CudaBackend {
     #[allow(clippy::too_many_arguments)]
     pub fn rope_paged_kv_write_f16(
         &self,
-        query: &mut DeviceBuffer<f16>,
-        key: &mut DeviceBuffer<f16>,
-        value: &DeviceBuffer<f16>,
-        positions: &DeviceBuffer<i64>,
-        cos_sin_cache: &DeviceBuffer<f16>,
-        key_cache: &mut DeviceBuffer<f16>,
-        value_cache: &mut DeviceBuffer<f16>,
-        slot_mapping: &DeviceBuffer<i64>,
+        query: &mut impl CudaDeviceWrite<f16>,
+        key: &mut impl CudaDeviceWrite<f16>,
+        value: &impl CudaDeviceRead<f16>,
+        positions: &impl CudaDeviceRead<i64>,
+        cos_sin_cache: &impl CudaDeviceRead<f16>,
+        key_cache: &mut impl CudaDeviceWrite<f16>,
+        value_cache: &mut impl CudaDeviceWrite<f16>,
+        slot_mapping: &impl CudaDeviceRead<i64>,
         spec: RopePagedKvWriteSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F16)?;
@@ -128,7 +128,7 @@ impl CudaBackend {
                 shape.value_page_stride,
                 shape.value_head_stride,
                 shape.is_neox,
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -137,14 +137,14 @@ impl CudaBackend {
     #[allow(clippy::too_many_arguments)]
     pub fn rope_paged_kv_write_bf16(
         &self,
-        query: &mut DeviceBuffer<bf16>,
-        key: &mut DeviceBuffer<bf16>,
-        value: &DeviceBuffer<bf16>,
-        positions: &DeviceBuffer<i64>,
-        cos_sin_cache: &DeviceBuffer<bf16>,
-        key_cache: &mut DeviceBuffer<bf16>,
-        value_cache: &mut DeviceBuffer<bf16>,
-        slot_mapping: &DeviceBuffer<i64>,
+        query: &mut impl CudaDeviceWrite<bf16>,
+        key: &mut impl CudaDeviceWrite<bf16>,
+        value: &impl CudaDeviceRead<bf16>,
+        positions: &impl CudaDeviceRead<i64>,
+        cos_sin_cache: &impl CudaDeviceRead<bf16>,
+        key_cache: &mut impl CudaDeviceWrite<bf16>,
+        value_cache: &mut impl CudaDeviceWrite<bf16>,
+        slot_mapping: &impl CudaDeviceRead<i64>,
         spec: RopePagedKvWriteSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::Bf16)?;
@@ -192,7 +192,7 @@ impl CudaBackend {
                 shape.value_page_stride,
                 shape.value_head_stride,
                 shape.is_neox,
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -238,14 +238,14 @@ struct AbiShape {
 
 #[allow(clippy::too_many_arguments)]
 fn validate_buffers<T: Copy>(
-    query: &DeviceBuffer<T>,
-    key: &DeviceBuffer<T>,
-    value: &DeviceBuffer<T>,
-    positions: &DeviceBuffer<i64>,
-    cos_sin_cache: &DeviceBuffer<T>,
-    key_cache: &DeviceBuffer<T>,
-    value_cache: &DeviceBuffer<T>,
-    slot_mapping: &DeviceBuffer<i64>,
+    query: &impl CudaDeviceRead<T>,
+    key: &impl CudaDeviceRead<T>,
+    value: &impl CudaDeviceRead<T>,
+    positions: &impl CudaDeviceRead<i64>,
+    cos_sin_cache: &impl CudaDeviceRead<T>,
+    key_cache: &impl CudaDeviceRead<T>,
+    value_cache: &impl CudaDeviceRead<T>,
+    slot_mapping: &impl CudaDeviceRead<i64>,
     spec: RopePagedKvWriteSpec,
 ) -> Result<AbiShape, CudaExecutorError> {
     let rotary = spec.rotary();
@@ -351,6 +351,7 @@ fn validate_buffers<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::DeviceBuffer;
     use loom_kernels::{rope_paged_kv_write_f32_reference, RotaryEmbeddingSpec, RotaryStyle};
 
     #[test]

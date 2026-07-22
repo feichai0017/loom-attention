@@ -26,6 +26,24 @@ Status: complete for the Rust source crates in `1.0.0-alpha.1`.
 Exit: a downstream Rust consumer can build the published source crates and run
 an oracle-checked CUDA path without cloning the repository.
 
+## K0.6: Engine-Owned Runtime Interop
+
+Status: in progress for the next alpha.
+
+- ~~generic safe backend over owned or borrowed CUDA streams~~;
+- ~~sealed read/write device-memory traits shared by owned buffers and borrowed
+  tensor views~~;
+- ~~zero-copy H20 oracle smoke on a borrowed stream and borrowed allocations,
+  including non-destruction of framework-owned resources~~;
+- route one real framework adapter through the safe Rust boundary instead of
+  calling the raw C ABI directly;
+- validate external current-stream ordering, CUDA Graph capture, and engine
+  fallback behavior through that Rust-owned path.
+
+Exit: an inference-engine call reaches checked Rust dispatch using its existing
+tensor memory and CUDA stream, with no hidden copy, allocation, or ownership
+transfer.
+
 ## K1: Useful Normalization Family
 
 Status: in progress.

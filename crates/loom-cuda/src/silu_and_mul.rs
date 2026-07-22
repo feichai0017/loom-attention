@@ -1,15 +1,15 @@
 use crate::rms_norm::CudaBackend;
-use crate::runtime::{loom_status_result, DeviceBuffer};
+use crate::runtime::{loom_status_result, CudaDeviceRead, CudaDeviceWrite, CudaStreamHandle};
 use crate::CudaExecutorError;
 use half::{bf16, f16};
 use loom_kernels::{DType, SiluAndMulDynamicFp8Spec, SiluAndMulSpec};
 
-impl CudaBackend {
+impl<S: CudaStreamHandle> CudaBackend<S> {
     /// Launches vectorized F32 SiLU-and-Mul asynchronously on this stream.
     pub fn silu_and_mul_f32(
         &self,
-        input: &DeviceBuffer<f32>,
-        output: &mut DeviceBuffer<f32>,
+        input: &impl CudaDeviceRead<f32>,
+        output: &mut impl CudaDeviceWrite<f32>,
         spec: SiluAndMulSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F32)?;
@@ -20,7 +20,7 @@ impl CudaBackend {
                 output.as_mut_ptr(),
                 rows,
                 width,
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -28,8 +28,8 @@ impl CudaBackend {
     /// Launches vectorized FP16 SiLU-and-Mul asynchronously on this stream.
     pub fn silu_and_mul_f16(
         &self,
-        input: &DeviceBuffer<f16>,
-        output: &mut DeviceBuffer<f16>,
+        input: &impl CudaDeviceRead<f16>,
+        output: &mut impl CudaDeviceWrite<f16>,
         spec: SiluAndMulSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F16)?;
@@ -40,7 +40,7 @@ impl CudaBackend {
                 output.as_mut_ptr().cast::<u16>(),
                 rows,
                 width,
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -48,8 +48,8 @@ impl CudaBackend {
     /// Launches vectorized BF16 SiLU-and-Mul asynchronously on this stream.
     pub fn silu_and_mul_bf16(
         &self,
-        input: &DeviceBuffer<bf16>,
-        output: &mut DeviceBuffer<bf16>,
+        input: &impl CudaDeviceRead<bf16>,
+        output: &mut impl CudaDeviceWrite<bf16>,
         spec: SiluAndMulSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::Bf16)?;
@@ -60,7 +60,7 @@ impl CudaBackend {
                 output.as_mut_ptr().cast::<u16>(),
                 rows,
                 width,
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -68,9 +68,9 @@ impl CudaBackend {
     /// Launches fused FP16 SwiGLU and dynamic per-block FP8 asynchronously.
     pub fn silu_and_mul_dynamic_fp8_f16(
         &self,
-        input: &DeviceBuffer<f16>,
-        output: &mut DeviceBuffer<u8>,
-        scales: &mut DeviceBuffer<f32>,
+        input: &impl CudaDeviceRead<f16>,
+        output: &mut impl CudaDeviceWrite<u8>,
+        scales: &mut impl CudaDeviceWrite<f32>,
         spec: SiluAndMulDynamicFp8Spec,
     ) -> Result<(), CudaExecutorError> {
         require_quant_dtype(spec, DType::F16)?;
@@ -85,7 +85,7 @@ impl CudaBackend {
                 group_size,
                 std::ptr::null(),
                 0,
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -93,9 +93,9 @@ impl CudaBackend {
     /// Launches fused BF16 SwiGLU and dynamic per-block FP8 asynchronously.
     pub fn silu_and_mul_dynamic_fp8_bf16(
         &self,
-        input: &DeviceBuffer<bf16>,
-        output: &mut DeviceBuffer<u8>,
-        scales: &mut DeviceBuffer<f32>,
+        input: &impl CudaDeviceRead<bf16>,
+        output: &mut impl CudaDeviceWrite<u8>,
+        scales: &mut impl CudaDeviceWrite<f32>,
         spec: SiluAndMulDynamicFp8Spec,
     ) -> Result<(), CudaExecutorError> {
         require_quant_dtype(spec, DType::Bf16)?;
@@ -110,7 +110,7 @@ impl CudaBackend {
                 group_size,
                 std::ptr::null(),
                 0,
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -128,8 +128,8 @@ fn require_dtype(spec: SiluAndMulSpec, expected: DType) -> Result<(), CudaExecut
 }
 
 fn validate_buffers<T: Copy>(
-    input: &DeviceBuffer<T>,
-    output: &DeviceBuffer<T>,
+    input: &impl CudaDeviceRead<T>,
+    output: &impl CudaDeviceRead<T>,
     spec: SiluAndMulSpec,
 ) -> Result<(u32, u32), CudaExecutorError> {
     input.require_len(spec.input_numel(), "SiLU-and-Mul input")?;
@@ -159,9 +159,9 @@ fn require_quant_dtype(
 }
 
 fn validate_quant_buffers<T: Copy>(
-    input: &DeviceBuffer<T>,
-    output: &DeviceBuffer<u8>,
-    scales: &DeviceBuffer<f32>,
+    input: &impl CudaDeviceRead<T>,
+    output: &impl CudaDeviceRead<u8>,
+    scales: &impl CudaDeviceRead<f32>,
     spec: SiluAndMulDynamicFp8Spec,
 ) -> Result<(u32, u32, u32), CudaExecutorError> {
     input.require_len(spec.input_numel(), "SiLU-and-Mul+FP8 input")?;

@@ -12,11 +12,39 @@ tokenization, KV lifetime, or request serving.
 | --- | --- |
 | `loom-kernels` | dtype, shape/layout, aliasing, capability, and reference contracts |
 | `loom-cuda-sys` | stable C ABI, CUDA compilation, and packaged handwritten kernels |
-| `loom-cuda` | safe resource ownership, validation, dispatch, and benchmarks |
+| `loom-cuda` | safe owned/borrowed CUDA resources, validation, dispatch, and benchmarks |
 | engine adapters | translate engine tensors/streams without owning engine policy |
 
 CPU references never call accelerator code. Backends report unsupported
 contracts explicitly; they do not silently copy, cast, or fall back.
+
+## Engine-Owned CUDA Resources
+
+`loom-cuda` supports two execution modes behind the same checked operator
+methods:
+
+| Resource | Standalone Rust | Embedded engine |
+| --- | --- | --- |
+| stream | owned `CudaStream` | non-owning `CudaStreamRef` |
+| read-only memory | owned `DeviceBuffer<T>` | borrowed `DeviceSlice<'a, T>` |
+| writable memory | owned `DeviceBuffer<T>` | exclusive `DeviceSliceMut<'a, T>` |
+
+`CudaBackend` is generic over the stream handle. All safe operator entrypoints
+accept sealed read/write device-memory traits, so owned and borrowed storage use
+the same dtype, length, and shape validation. Borrowed handles do not allocate,
+copy, synchronize, or destroy framework resources.
+
+Raw stream and device-pointer construction is intentionally `unsafe`: an
+adapter must prove the active CUDA device/context, storage dtype, pointer
+alignment, lifetime, exclusivity, and stream ordering. Once that narrow
+boundary is crossed, ordinary callers cannot invent alternative trait
+implementations or pass read-only storage as a mutable output. Kernel launches
+remain asynchronous.
+
+The pure-Rust H20 smoke test exercises this zero-copy path. The current C++
+PyTorch dispatcher still calls the stable C ABI directly; routing a real engine
+adapter through this checked Rust boundary is a separate integration gate, not
+something inferred from the smoke test.
 
 ## Add+RMSNorm Contract
 

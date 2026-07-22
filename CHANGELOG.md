@@ -3,6 +3,18 @@
 Loom Kernels follows Semantic Versioning. The Rust crates use Cargo's SemVer
 spelling; Python source-adapter metadata uses the equivalent PEP 440 spelling.
 
+## Unreleased
+
+### Added
+
+- non-owning `CudaStreamRef` execution for framework-controlled CUDA streams;
+- typed `DeviceSlice` and `DeviceSliceMut` views over framework-owned device
+  allocations;
+- sealed read/write memory traits so every safe Rust operator accepts owned or
+  borrowed storage through the same contract validation;
+- an H20 smoke path covering borrowed stream and allocation execution without
+  ownership transfer.
+
 ## 1.0.0-alpha.1 — 2026-07-22
 
 First public alpha of Loom Kernels as a Rust-first CUDA operator backend for

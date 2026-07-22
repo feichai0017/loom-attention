@@ -1,17 +1,17 @@
 use crate::rms_norm::CudaBackend;
-use crate::runtime::{loom_status_result, DeviceBuffer};
+use crate::runtime::{loom_status_result, CudaDeviceRead, CudaDeviceWrite, CudaStreamHandle};
 use crate::CudaExecutorError;
 use half::{bf16, f16};
 use loom_kernels::{DType, GreedySampleLogprobsSpec, SelectedTokenLogprobsSpec};
 
-impl CudaBackend {
+impl<S: CudaStreamHandle> CudaBackend<S> {
     /// Fuses F32 greedy selection with the sampled token's logprob and rank.
     pub fn greedy_sample_logprobs_f32(
         &self,
-        logits: &DeviceBuffer<f32>,
-        token_ids: &mut DeviceBuffer<i32>,
-        logprobs: &mut DeviceBuffer<f32>,
-        ranks: &mut DeviceBuffer<i64>,
+        logits: &impl CudaDeviceRead<f32>,
+        token_ids: &mut impl CudaDeviceWrite<i32>,
+        logprobs: &mut impl CudaDeviceWrite<f32>,
+        ranks: &mut impl CudaDeviceWrite<i64>,
         spec: GreedySampleLogprobsSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F32)?;
@@ -25,7 +25,7 @@ impl CudaBackend {
                 rows,
                 vocab_size,
                 u64::from(vocab_size),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -33,10 +33,10 @@ impl CudaBackend {
     /// Fuses FP16 greedy selection with an F32 sampled-token logprob.
     pub fn greedy_sample_logprobs_f16(
         &self,
-        logits: &DeviceBuffer<f16>,
-        token_ids: &mut DeviceBuffer<i32>,
-        logprobs: &mut DeviceBuffer<f32>,
-        ranks: &mut DeviceBuffer<i64>,
+        logits: &impl CudaDeviceRead<f16>,
+        token_ids: &mut impl CudaDeviceWrite<i32>,
+        logprobs: &mut impl CudaDeviceWrite<f32>,
+        ranks: &mut impl CudaDeviceWrite<i64>,
         spec: GreedySampleLogprobsSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F16)?;
@@ -50,7 +50,7 @@ impl CudaBackend {
                 rows,
                 vocab_size,
                 u64::from(vocab_size),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -58,10 +58,10 @@ impl CudaBackend {
     /// Fuses BF16 greedy selection with an F32 sampled-token logprob.
     pub fn greedy_sample_logprobs_bf16(
         &self,
-        logits: &DeviceBuffer<bf16>,
-        token_ids: &mut DeviceBuffer<i32>,
-        logprobs: &mut DeviceBuffer<f32>,
-        ranks: &mut DeviceBuffer<i64>,
+        logits: &impl CudaDeviceRead<bf16>,
+        token_ids: &mut impl CudaDeviceWrite<i32>,
+        logprobs: &mut impl CudaDeviceWrite<f32>,
+        ranks: &mut impl CudaDeviceWrite<i64>,
         spec: GreedySampleLogprobsSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::Bf16)?;
@@ -75,7 +75,7 @@ impl CudaBackend {
                 rows,
                 vocab_size,
                 u64::from(vocab_size),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -83,10 +83,10 @@ impl CudaBackend {
     /// Computes selected-token F32 logprobs and ranks from F32 logits.
     pub fn selected_token_logprobs_f32(
         &self,
-        logits: &DeviceBuffer<f32>,
-        token_ids: &DeviceBuffer<i64>,
-        logprobs: &mut DeviceBuffer<f32>,
-        ranks: &mut DeviceBuffer<i64>,
+        logits: &impl CudaDeviceRead<f32>,
+        token_ids: &impl CudaDeviceRead<i64>,
+        logprobs: &mut impl CudaDeviceWrite<f32>,
+        ranks: &mut impl CudaDeviceWrite<i64>,
         spec: SelectedTokenLogprobsSpec,
     ) -> Result<(), CudaExecutorError> {
         require_selected_dtype(spec, DType::F32)?;
@@ -101,7 +101,7 @@ impl CudaBackend {
                 rows,
                 vocab_size,
                 u64::from(vocab_size),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -109,10 +109,10 @@ impl CudaBackend {
     /// Computes selected-token F32 logprobs and ranks from FP16 logits.
     pub fn selected_token_logprobs_f16(
         &self,
-        logits: &DeviceBuffer<f16>,
-        token_ids: &DeviceBuffer<i64>,
-        logprobs: &mut DeviceBuffer<f32>,
-        ranks: &mut DeviceBuffer<i64>,
+        logits: &impl CudaDeviceRead<f16>,
+        token_ids: &impl CudaDeviceRead<i64>,
+        logprobs: &mut impl CudaDeviceWrite<f32>,
+        ranks: &mut impl CudaDeviceWrite<i64>,
         spec: SelectedTokenLogprobsSpec,
     ) -> Result<(), CudaExecutorError> {
         require_selected_dtype(spec, DType::F16)?;
@@ -127,7 +127,7 @@ impl CudaBackend {
                 rows,
                 vocab_size,
                 u64::from(vocab_size),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -135,10 +135,10 @@ impl CudaBackend {
     /// Computes selected-token F32 logprobs and ranks from BF16 logits.
     pub fn selected_token_logprobs_bf16(
         &self,
-        logits: &DeviceBuffer<bf16>,
-        token_ids: &DeviceBuffer<i64>,
-        logprobs: &mut DeviceBuffer<f32>,
-        ranks: &mut DeviceBuffer<i64>,
+        logits: &impl CudaDeviceRead<bf16>,
+        token_ids: &impl CudaDeviceRead<i64>,
+        logprobs: &mut impl CudaDeviceWrite<f32>,
+        ranks: &mut impl CudaDeviceWrite<i64>,
         spec: SelectedTokenLogprobsSpec,
     ) -> Result<(), CudaExecutorError> {
         require_selected_dtype(spec, DType::Bf16)?;
@@ -153,7 +153,7 @@ impl CudaBackend {
                 rows,
                 vocab_size,
                 u64::from(vocab_size),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -171,10 +171,10 @@ fn require_dtype(spec: GreedySampleLogprobsSpec, expected: DType) -> Result<(), 
 }
 
 fn validate_buffers<T: Copy>(
-    logits: &DeviceBuffer<T>,
-    token_ids: &DeviceBuffer<i32>,
-    logprobs: &DeviceBuffer<f32>,
-    ranks: &DeviceBuffer<i64>,
+    logits: &impl CudaDeviceRead<T>,
+    token_ids: &impl CudaDeviceRead<i32>,
+    logprobs: &impl CudaDeviceRead<f32>,
+    ranks: &impl CudaDeviceRead<i64>,
     spec: GreedySampleLogprobsSpec,
 ) -> Result<(u32, u32), CudaExecutorError> {
     logits.require_len(spec.logits_numel(), "greedy-sampling logits")?;
@@ -210,10 +210,10 @@ fn require_selected_dtype(
 }
 
 fn validate_selected_buffers<T: Copy>(
-    logits: &DeviceBuffer<T>,
-    token_ids: &DeviceBuffer<i64>,
-    logprobs: &DeviceBuffer<f32>,
-    ranks: &DeviceBuffer<i64>,
+    logits: &impl CudaDeviceRead<T>,
+    token_ids: &impl CudaDeviceRead<i64>,
+    logprobs: &impl CudaDeviceRead<f32>,
+    ranks: &impl CudaDeviceRead<i64>,
     spec: SelectedTokenLogprobsSpec,
 ) -> Result<(u32, u32), CudaExecutorError> {
     logits.require_len(spec.logits_numel(), "selected-token logits")?;
@@ -232,6 +232,7 @@ fn validate_selected_buffers<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::DeviceBuffer;
     use loom_kernels::{
         greedy_sample_logprobs_f32_reference, selected_token_logprobs_f32_reference,
     };

@@ -1,33 +1,48 @@
-use crate::runtime::{loom_status_result, CudaStream, DeviceBuffer};
+use crate::runtime::{
+    loom_status_result, CudaDeviceRead, CudaDeviceWrite, CudaStream, CudaStreamHandle,
+};
 use crate::CudaExecutorError;
 use half::{bf16, f16};
 use loom_kernels::{
     AddRmsNormSpec, Backend, DType, OperatorSpec, RmsNormDynamicFp8Spec, RmsNormSpec, Support,
 };
 
-/// CUDA backend bound to one owned execution stream.
+/// CUDA backend bound to an owned stream by default or a borrowed stream when
+/// constructed with [`CudaBackend::from_stream`].
 #[derive(Debug)]
-pub struct CudaBackend {
-    stream: CudaStream,
+pub struct CudaBackend<S = CudaStream> {
+    stream: S,
 }
 
-impl CudaBackend {
+impl CudaBackend<CudaStream> {
     pub fn new() -> Result<Self, CudaExecutorError> {
         Ok(Self {
             stream: CudaStream::new()?,
         })
     }
+}
 
-    pub const fn stream(&self) -> &CudaStream {
+impl<S: CudaStreamHandle> CudaBackend<S> {
+    /// Uses an existing owned or borrowed stream handle without allocating a
+    /// second execution stream.
+    pub const fn from_stream(stream: S) -> Self {
+        Self { stream }
+    }
+
+    pub const fn stream(&self) -> &S {
         &self.stream
+    }
+
+    pub(crate) fn raw_stream(&self) -> *mut std::ffi::c_void {
+        self.stream.raw()
     }
 
     /// Launches F32 RMSNorm asynchronously on this backend's stream.
     pub fn rms_norm_f32(
         &self,
-        input: &DeviceBuffer<f32>,
-        weight: &DeviceBuffer<f32>,
-        output: &mut DeviceBuffer<f32>,
+        input: &impl CudaDeviceRead<f32>,
+        weight: &impl CudaDeviceRead<f32>,
+        output: &mut impl CudaDeviceWrite<f32>,
         spec: RmsNormSpec,
     ) -> Result<(), CudaExecutorError> {
         if spec.dtype() != DType::F32 {
@@ -46,7 +61,7 @@ impl CudaBackend {
                 rows,
                 hidden_size,
                 spec.epsilon(),
-                self.stream.raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -54,9 +69,9 @@ impl CudaBackend {
     /// Launches pair-vectorized FP16 RMSNorm asynchronously on this stream.
     pub fn rms_norm_f16(
         &self,
-        input: &DeviceBuffer<f16>,
-        weight: &DeviceBuffer<f16>,
-        output: &mut DeviceBuffer<f16>,
+        input: &impl CudaDeviceRead<f16>,
+        weight: &impl CudaDeviceRead<f16>,
+        output: &mut impl CudaDeviceWrite<f16>,
         spec: RmsNormSpec,
     ) -> Result<(), CudaExecutorError> {
         if spec.dtype() != DType::F16 {
@@ -75,7 +90,7 @@ impl CudaBackend {
                 rows,
                 hidden_size,
                 spec.epsilon(),
-                self.stream.raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -83,9 +98,9 @@ impl CudaBackend {
     /// Launches pair-vectorized BF16 RMSNorm asynchronously on this stream.
     pub fn rms_norm_bf16(
         &self,
-        input: &DeviceBuffer<bf16>,
-        weight: &DeviceBuffer<bf16>,
-        output: &mut DeviceBuffer<bf16>,
+        input: &impl CudaDeviceRead<bf16>,
+        weight: &impl CudaDeviceRead<bf16>,
+        output: &mut impl CudaDeviceWrite<bf16>,
         spec: RmsNormSpec,
     ) -> Result<(), CudaExecutorError> {
         if spec.dtype() != DType::Bf16 {
@@ -104,7 +119,7 @@ impl CudaBackend {
                 rows,
                 hidden_size,
                 spec.epsilon(),
-                self.stream.raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -112,10 +127,10 @@ impl CudaBackend {
     /// Fuses F32 RMSNorm with dynamic per-token FP8 E4M3FN quantization.
     pub fn rms_norm_dynamic_fp8_f32(
         &self,
-        input: &DeviceBuffer<f32>,
-        weight: &DeviceBuffer<f32>,
-        output: &mut DeviceBuffer<u8>,
-        scales: &mut DeviceBuffer<f32>,
+        input: &impl CudaDeviceRead<f32>,
+        weight: &impl CudaDeviceRead<f32>,
+        output: &mut impl CudaDeviceWrite<u8>,
+        scales: &mut impl CudaDeviceWrite<f32>,
         spec: RmsNormDynamicFp8Spec,
     ) -> Result<(), CudaExecutorError> {
         if spec.input_dtype() != DType::F32 {
@@ -136,7 +151,7 @@ impl CudaBackend {
                 rows,
                 hidden_size,
                 spec.epsilon(),
-                self.stream.raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -144,10 +159,10 @@ impl CudaBackend {
     /// Fuses FP16 RMSNorm with dynamic per-token FP8 E4M3FN quantization.
     pub fn rms_norm_dynamic_fp8_f16(
         &self,
-        input: &DeviceBuffer<f16>,
-        weight: &DeviceBuffer<f16>,
-        output: &mut DeviceBuffer<u8>,
-        scales: &mut DeviceBuffer<f32>,
+        input: &impl CudaDeviceRead<f16>,
+        weight: &impl CudaDeviceRead<f16>,
+        output: &mut impl CudaDeviceWrite<u8>,
+        scales: &mut impl CudaDeviceWrite<f32>,
         spec: RmsNormDynamicFp8Spec,
     ) -> Result<(), CudaExecutorError> {
         if spec.input_dtype() != DType::F16 {
@@ -168,7 +183,7 @@ impl CudaBackend {
                 rows,
                 hidden_size,
                 spec.epsilon(),
-                self.stream.raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -176,10 +191,10 @@ impl CudaBackend {
     /// Fuses BF16 RMSNorm with dynamic per-token FP8 E4M3FN quantization.
     pub fn rms_norm_dynamic_fp8_bf16(
         &self,
-        input: &DeviceBuffer<bf16>,
-        weight: &DeviceBuffer<bf16>,
-        output: &mut DeviceBuffer<u8>,
-        scales: &mut DeviceBuffer<f32>,
+        input: &impl CudaDeviceRead<bf16>,
+        weight: &impl CudaDeviceRead<bf16>,
+        output: &mut impl CudaDeviceWrite<u8>,
+        scales: &mut impl CudaDeviceWrite<f32>,
         spec: RmsNormDynamicFp8Spec,
     ) -> Result<(), CudaExecutorError> {
         if spec.input_dtype() != DType::Bf16 {
@@ -200,7 +215,7 @@ impl CudaBackend {
                 rows,
                 hidden_size,
                 spec.epsilon(),
-                self.stream.raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -208,9 +223,9 @@ impl CudaBackend {
     /// Fuses F32 residual addition and RMSNorm, updating both buffers in place.
     pub fn add_rms_norm_f32(
         &self,
-        input: &mut DeviceBuffer<f32>,
-        residual: &mut DeviceBuffer<f32>,
-        weight: &DeviceBuffer<f32>,
+        input: &mut impl CudaDeviceWrite<f32>,
+        residual: &mut impl CudaDeviceWrite<f32>,
+        weight: &impl CudaDeviceRead<f32>,
         spec: AddRmsNormSpec,
     ) -> Result<(), CudaExecutorError> {
         if spec.dtype() != DType::F32 {
@@ -229,7 +244,7 @@ impl CudaBackend {
                 rows,
                 hidden_size,
                 spec.epsilon(),
-                self.stream.raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -237,9 +252,9 @@ impl CudaBackend {
     /// Fuses pair-vectorized FP16 residual addition and RMSNorm in place.
     pub fn add_rms_norm_f16(
         &self,
-        input: &mut DeviceBuffer<f16>,
-        residual: &mut DeviceBuffer<f16>,
-        weight: &DeviceBuffer<f16>,
+        input: &mut impl CudaDeviceWrite<f16>,
+        residual: &mut impl CudaDeviceWrite<f16>,
+        weight: &impl CudaDeviceRead<f16>,
         spec: AddRmsNormSpec,
     ) -> Result<(), CudaExecutorError> {
         if spec.dtype() != DType::F16 {
@@ -258,7 +273,7 @@ impl CudaBackend {
                 rows,
                 hidden_size,
                 spec.epsilon(),
-                self.stream.raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -266,9 +281,9 @@ impl CudaBackend {
     /// Fuses pair-vectorized BF16 residual addition and RMSNorm in place.
     pub fn add_rms_norm_bf16(
         &self,
-        input: &mut DeviceBuffer<bf16>,
-        residual: &mut DeviceBuffer<bf16>,
-        weight: &DeviceBuffer<bf16>,
+        input: &mut impl CudaDeviceWrite<bf16>,
+        residual: &mut impl CudaDeviceWrite<bf16>,
+        weight: &impl CudaDeviceRead<bf16>,
         spec: AddRmsNormSpec,
     ) -> Result<(), CudaExecutorError> {
         if spec.dtype() != DType::Bf16 {
@@ -287,13 +302,13 @@ impl CudaBackend {
                 rows,
                 hidden_size,
                 spec.epsilon(),
-                self.stream.raw(),
+                self.raw_stream(),
             )
         })
     }
 }
 
-impl Backend for CudaBackend {
+impl<S: CudaStreamHandle> Backend for CudaBackend<S> {
     fn name(&self) -> &'static str {
         "loom-cuda"
     }
@@ -404,9 +419,9 @@ impl Backend for CudaBackend {
 }
 
 fn validate_buffers<T: Copy>(
-    input: &DeviceBuffer<T>,
-    weight: &DeviceBuffer<T>,
-    output: &DeviceBuffer<T>,
+    input: &impl CudaDeviceRead<T>,
+    weight: &impl CudaDeviceRead<T>,
+    output: &impl CudaDeviceRead<T>,
     spec: RmsNormSpec,
 ) -> Result<(u32, u32), CudaExecutorError> {
     input.require_len(spec.numel(), "RMSNorm input")?;
@@ -422,9 +437,9 @@ fn validate_buffers<T: Copy>(
 }
 
 fn validate_add_rms_norm_buffers<T: Copy>(
-    input: &DeviceBuffer<T>,
-    residual: &DeviceBuffer<T>,
-    weight: &DeviceBuffer<T>,
+    input: &impl CudaDeviceRead<T>,
+    residual: &impl CudaDeviceRead<T>,
+    weight: &impl CudaDeviceRead<T>,
     spec: AddRmsNormSpec,
 ) -> Result<(u32, u32), CudaExecutorError> {
     input.require_len(spec.numel(), "Add+RMSNorm input")?;
@@ -440,10 +455,10 @@ fn validate_add_rms_norm_buffers<T: Copy>(
 }
 
 fn validate_rms_norm_dynamic_fp8_buffers<T: Copy>(
-    input: &DeviceBuffer<T>,
-    weight: &DeviceBuffer<T>,
-    output: &DeviceBuffer<u8>,
-    scales: &DeviceBuffer<f32>,
+    input: &impl CudaDeviceRead<T>,
+    weight: &impl CudaDeviceRead<T>,
+    output: &impl CudaDeviceRead<u8>,
+    scales: &impl CudaDeviceRead<f32>,
     spec: RmsNormDynamicFp8Spec,
 ) -> Result<(u32, u32), CudaExecutorError> {
     input.require_len(spec.numel(), "RMSNorm+FP8 input")?;

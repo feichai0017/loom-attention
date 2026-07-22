@@ -1,15 +1,15 @@
 use crate::rms_norm::CudaBackend;
-use crate::runtime::{loom_status_result, DeviceBuffer};
+use crate::runtime::{loom_status_result, CudaDeviceRead, CudaDeviceWrite, CudaStreamHandle};
 use crate::CudaExecutorError;
 use half::{bf16, f16};
 use loom_kernels::{DType, MinPFilterSpec};
 
-impl CudaBackend {
+impl<S: CudaStreamHandle> CudaBackend<S> {
     /// Applies in-place F32 min-p filtering without materializing softmax.
     pub fn min_p_filter_f32(
         &self,
-        logits: &mut DeviceBuffer<f32>,
-        min_p: &DeviceBuffer<f32>,
+        logits: &mut impl CudaDeviceWrite<f32>,
+        min_p: &impl CudaDeviceRead<f32>,
         spec: MinPFilterSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F32)?;
@@ -21,7 +21,7 @@ impl CudaBackend {
                 rows,
                 vocab_size,
                 u64::from(vocab_size),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -29,8 +29,8 @@ impl CudaBackend {
     /// Applies in-place FP16 min-p filtering without materializing softmax.
     pub fn min_p_filter_f16(
         &self,
-        logits: &mut DeviceBuffer<f16>,
-        min_p: &DeviceBuffer<f32>,
+        logits: &mut impl CudaDeviceWrite<f16>,
+        min_p: &impl CudaDeviceRead<f32>,
         spec: MinPFilterSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F16)?;
@@ -42,7 +42,7 @@ impl CudaBackend {
                 rows,
                 vocab_size,
                 u64::from(vocab_size),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -50,8 +50,8 @@ impl CudaBackend {
     /// Applies in-place BF16 min-p filtering without materializing softmax.
     pub fn min_p_filter_bf16(
         &self,
-        logits: &mut DeviceBuffer<bf16>,
-        min_p: &DeviceBuffer<f32>,
+        logits: &mut impl CudaDeviceWrite<bf16>,
+        min_p: &impl CudaDeviceRead<f32>,
         spec: MinPFilterSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::Bf16)?;
@@ -63,7 +63,7 @@ impl CudaBackend {
                 rows,
                 vocab_size,
                 u64::from(vocab_size),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -81,8 +81,8 @@ fn require_dtype(spec: MinPFilterSpec, expected: DType) -> Result<(), CudaExecut
 }
 
 fn validate_buffers<T: Copy>(
-    logits: &DeviceBuffer<T>,
-    min_p: &DeviceBuffer<f32>,
+    logits: &impl CudaDeviceRead<T>,
+    min_p: &impl CudaDeviceRead<f32>,
     spec: MinPFilterSpec,
 ) -> Result<(u32, u32), CudaExecutorError> {
     logits.require_len(spec.logits_numel(), "min-p logits")?;
@@ -98,6 +98,7 @@ fn validate_buffers<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::DeviceBuffer;
     use loom_kernels::min_p_filter_f32_reference;
 
     #[test]

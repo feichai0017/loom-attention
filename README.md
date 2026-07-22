@@ -56,16 +56,22 @@ is never a performance claim.
 
 ```mermaid
 flowchart LR
-    A["Inference engine"] --> B["PyTorch / vLLM adapter"]
+    A["Inference engine"] --> B["Native Rust adapter"]
+    A --> P["PyTorch / vLLM adapter"]
     B --> C["Safe Rust dispatch"]
     C --> D["Raw C ABI"]
+    P --> D
     D --> E["Handwritten CUDA"]
     F["Rust contracts + CPU oracles"] -. validates .-> B
     F -. gates .-> C
+    F -. validates .-> P
 ```
 
 The backend either accepts the exact contract or declines it. Adapters do not
 silently copy, cast, reshape, or change sampling policy to force a Loom path.
+The current C++ PyTorch bridge calls the stable C ABI directly; the next-alpha
+runtime work adds borrowed streams and tensor views so a native adapter can
+enter the same checked Rust dispatch without taking ownership or copying data.
 
 ## Quick start
 

@@ -1,22 +1,22 @@
 use crate::rms_norm::CudaBackend;
-use crate::runtime::{loom_status_result, DeviceBuffer};
+use crate::runtime::{loom_status_result, CudaDeviceRead, CudaDeviceWrite, CudaStreamHandle};
 use crate::CudaExecutorError;
 use half::{bf16, f16};
 use loom_kernels::{DType, PagedDecodeAttentionSpec};
 
 pub(crate) const PAGED_DECODE_MAX_CONTEXT: usize = 1024;
 
-impl CudaBackend {
+impl<S: CudaStreamHandle> CudaBackend<S> {
     /// Executes base F32 paged MQA/GQA decode attention asynchronously.
     #[allow(clippy::too_many_arguments)]
     pub fn paged_decode_attention_f32(
         &self,
-        query: &DeviceBuffer<f32>,
-        key_cache: &DeviceBuffer<f32>,
-        value_cache: &DeviceBuffer<f32>,
-        block_tables: &DeviceBuffer<i32>,
-        sequence_lengths: &DeviceBuffer<i32>,
-        output: &mut DeviceBuffer<f32>,
+        query: &impl CudaDeviceRead<f32>,
+        key_cache: &impl CudaDeviceRead<f32>,
+        value_cache: &impl CudaDeviceRead<f32>,
+        block_tables: &impl CudaDeviceRead<i32>,
+        sequence_lengths: &impl CudaDeviceRead<i32>,
+        output: &mut impl CudaDeviceWrite<f32>,
         spec: PagedDecodeAttentionSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F32)?;
@@ -49,7 +49,7 @@ impl CudaBackend {
                 shape.max_blocks_per_sequence,
                 shape.max_sequence_length,
                 spec.scale(),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -58,12 +58,12 @@ impl CudaBackend {
     #[allow(clippy::too_many_arguments)]
     pub fn paged_decode_attention_f16(
         &self,
-        query: &DeviceBuffer<f16>,
-        key_cache: &DeviceBuffer<f16>,
-        value_cache: &DeviceBuffer<f16>,
-        block_tables: &DeviceBuffer<i32>,
-        sequence_lengths: &DeviceBuffer<i32>,
-        output: &mut DeviceBuffer<f16>,
+        query: &impl CudaDeviceRead<f16>,
+        key_cache: &impl CudaDeviceRead<f16>,
+        value_cache: &impl CudaDeviceRead<f16>,
+        block_tables: &impl CudaDeviceRead<i32>,
+        sequence_lengths: &impl CudaDeviceRead<i32>,
+        output: &mut impl CudaDeviceWrite<f16>,
         spec: PagedDecodeAttentionSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F16)?;
@@ -96,7 +96,7 @@ impl CudaBackend {
                 shape.max_blocks_per_sequence,
                 shape.max_sequence_length,
                 spec.scale(),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -105,12 +105,12 @@ impl CudaBackend {
     #[allow(clippy::too_many_arguments)]
     pub fn paged_decode_attention_bf16(
         &self,
-        query: &DeviceBuffer<bf16>,
-        key_cache: &DeviceBuffer<bf16>,
-        value_cache: &DeviceBuffer<bf16>,
-        block_tables: &DeviceBuffer<i32>,
-        sequence_lengths: &DeviceBuffer<i32>,
-        output: &mut DeviceBuffer<bf16>,
+        query: &impl CudaDeviceRead<bf16>,
+        key_cache: &impl CudaDeviceRead<bf16>,
+        value_cache: &impl CudaDeviceRead<bf16>,
+        block_tables: &impl CudaDeviceRead<i32>,
+        sequence_lengths: &impl CudaDeviceRead<i32>,
+        output: &mut impl CudaDeviceWrite<bf16>,
         spec: PagedDecodeAttentionSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::Bf16)?;
@@ -143,7 +143,7 @@ impl CudaBackend {
                 shape.max_blocks_per_sequence,
                 shape.max_sequence_length,
                 spec.scale(),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -155,13 +155,13 @@ impl CudaBackend {
     #[allow(clippy::too_many_arguments)]
     pub fn paged_decode_attention_split_k_f32(
         &self,
-        query: &DeviceBuffer<f32>,
-        key_cache: &DeviceBuffer<f32>,
-        value_cache: &DeviceBuffer<f32>,
-        block_tables: &DeviceBuffer<i32>,
-        sequence_lengths: &DeviceBuffer<i32>,
-        output: &mut DeviceBuffer<f32>,
-        workspace: &mut DeviceBuffer<f32>,
+        query: &impl CudaDeviceRead<f32>,
+        key_cache: &impl CudaDeviceRead<f32>,
+        value_cache: &impl CudaDeviceRead<f32>,
+        block_tables: &impl CudaDeviceRead<i32>,
+        sequence_lengths: &impl CudaDeviceRead<i32>,
+        output: &mut impl CudaDeviceWrite<f32>,
+        workspace: &mut impl CudaDeviceWrite<f32>,
         spec: PagedDecodeAttentionSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F32)?;
@@ -197,7 +197,7 @@ impl CudaBackend {
                 shape.max_blocks_per_sequence,
                 shape.max_sequence_length,
                 spec.scale(),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -206,13 +206,13 @@ impl CudaBackend {
     #[allow(clippy::too_many_arguments)]
     pub fn paged_decode_attention_split_k_f16(
         &self,
-        query: &DeviceBuffer<f16>,
-        key_cache: &DeviceBuffer<f16>,
-        value_cache: &DeviceBuffer<f16>,
-        block_tables: &DeviceBuffer<i32>,
-        sequence_lengths: &DeviceBuffer<i32>,
-        output: &mut DeviceBuffer<f16>,
-        workspace: &mut DeviceBuffer<f32>,
+        query: &impl CudaDeviceRead<f16>,
+        key_cache: &impl CudaDeviceRead<f16>,
+        value_cache: &impl CudaDeviceRead<f16>,
+        block_tables: &impl CudaDeviceRead<i32>,
+        sequence_lengths: &impl CudaDeviceRead<i32>,
+        output: &mut impl CudaDeviceWrite<f16>,
+        workspace: &mut impl CudaDeviceWrite<f32>,
         spec: PagedDecodeAttentionSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::F16)?;
@@ -248,7 +248,7 @@ impl CudaBackend {
                 shape.max_blocks_per_sequence,
                 shape.max_sequence_length,
                 spec.scale(),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -257,13 +257,13 @@ impl CudaBackend {
     #[allow(clippy::too_many_arguments)]
     pub fn paged_decode_attention_split_k_bf16(
         &self,
-        query: &DeviceBuffer<bf16>,
-        key_cache: &DeviceBuffer<bf16>,
-        value_cache: &DeviceBuffer<bf16>,
-        block_tables: &DeviceBuffer<i32>,
-        sequence_lengths: &DeviceBuffer<i32>,
-        output: &mut DeviceBuffer<bf16>,
-        workspace: &mut DeviceBuffer<f32>,
+        query: &impl CudaDeviceRead<bf16>,
+        key_cache: &impl CudaDeviceRead<bf16>,
+        value_cache: &impl CudaDeviceRead<bf16>,
+        block_tables: &impl CudaDeviceRead<i32>,
+        sequence_lengths: &impl CudaDeviceRead<i32>,
+        output: &mut impl CudaDeviceWrite<bf16>,
+        workspace: &mut impl CudaDeviceWrite<f32>,
         spec: PagedDecodeAttentionSpec,
     ) -> Result<(), CudaExecutorError> {
         require_dtype(spec, DType::Bf16)?;
@@ -299,7 +299,7 @@ impl CudaBackend {
                 shape.max_blocks_per_sequence,
                 shape.max_sequence_length,
                 spec.scale(),
-                self.stream().raw(),
+                self.raw_stream(),
             )
         })
     }
@@ -422,7 +422,7 @@ fn split_k_workspace_elements(shape: AbiShape) -> Result<Option<usize>, CudaExec
 }
 
 fn require_split_k_workspace(
-    workspace: &DeviceBuffer<f32>,
+    workspace: &impl CudaDeviceRead<f32>,
     shape: AbiShape,
 ) -> Result<u64, CudaExecutorError> {
     let required = split_k_workspace_elements(shape)?.ok_or_else(|| {
@@ -445,12 +445,12 @@ fn require_split_k_workspace(
 
 #[allow(clippy::too_many_arguments)]
 fn validate_buffers<T: Copy>(
-    query: &DeviceBuffer<T>,
-    key_cache: &DeviceBuffer<T>,
-    value_cache: &DeviceBuffer<T>,
-    block_tables: &DeviceBuffer<i32>,
-    sequence_lengths: &DeviceBuffer<i32>,
-    output: &DeviceBuffer<T>,
+    query: &impl CudaDeviceRead<T>,
+    key_cache: &impl CudaDeviceRead<T>,
+    value_cache: &impl CudaDeviceRead<T>,
+    block_tables: &impl CudaDeviceRead<i32>,
+    sequence_lengths: &impl CudaDeviceRead<i32>,
+    output: &impl CudaDeviceRead<T>,
     spec: PagedDecodeAttentionSpec,
 ) -> Result<AbiShape, CudaExecutorError> {
     query.require_len(spec.query_numel(), "paged decode query")?;
@@ -465,6 +465,7 @@ fn validate_buffers<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::DeviceBuffer;
     use loom_kernels::paged_decode_attention_f32_reference;
 
     #[test]

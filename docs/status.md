@@ -6,7 +6,9 @@
 - `DType`, contiguous `TensorSpec`, normalization operator specs,
   `OperatorSpec`, and backend capability query;
 - F64-accumulation F32/FP16/BF16 RMSNorm and fused Add+RMSNorm CPU oracles;
-- owned CUDA streams, device buffers, and events;
+- owned CUDA streams, device buffers, and events, plus non-owning external
+  stream handles and typed read-only/exclusive device-memory views shared by
+  every safe operator entrypoint;
 - checked handwritten F32 plus pair-vectorized FP16/BF16 RMSNorm dispatch;
 - double in-place Add+RMSNorm with Rust-exclusive mutable-buffer contracts;
 - aligned 128-bit pack8 Add+RMSNorm with pair and scalar fallbacks;
