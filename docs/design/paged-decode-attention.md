@@ -14,10 +14,13 @@ the current token's K/V values, and submits one query token per active request.
 - sequence lengths: `[sequences]`, including the current cached token;
 - output: `[sequences, query_heads, value_head_size]`.
 
-This matches the logical NHD cache consumed by vLLM 0.24. A framework adapter
-may preserve an HND physical stride order without materializing a new cache.
-`query_heads` must be divisible by `kv_heads`; consecutive groups of query
-heads share one KV head for MQA/GQA.
+This matches the logical NHD cache consumed by vLLM 0.24. The inner
+`[block_size, kv_heads, head_size]` dimensions must be dense, while the outer
+block stride is explicit. Consequently, both separate K/V allocations and the
+two noncontiguous views of vLLM's physical
+`[blocks, 2, block_size, kv_heads, head_size]` cache are accepted without a
+copy. `query_heads` must be divisible by `kv_heads`; consecutive groups of
+query heads share one KV head for MQA/GQA.
 
 For logical position `p`, the physical token is selected by
 `block_tables[sequence, p / block_size]` and `p % block_size`. The base score
@@ -64,12 +67,32 @@ four, the H20-qualified dispatch packs four query heads instead. Small grids
 keep two-head packing to retain enough independent thread blocks. The dynamic
 score and token-offset buffers deliberately cap both paths at 1,024 tokens.
 
-The C ABI and PyTorch boundary accept contiguous int32 block tables and
-sequence lengths, matching vLLM's live metadata. Their active values are
-trusted engine metadata: the host-supplied maximum length and active block IDs
-must be valid. The safe Rust entrypoints preserve the same shapes and dtypes
-with checked device-buffer sizes. No implicit device-to-host validation or
-fallback is introduced on the launch path.
+The C ABI carries independent K/V block strides and accepts contiguous int32
+block tables and sequence lengths, matching vLLM's live metadata. Their active
+values are trusted engine metadata: the host-supplied maximum length and active
+block IDs must be valid. Safe Rust owns contiguous buffers and therefore passes
+their canonical block strides; PyTorch may pass native interleaved views. No
+implicit device-to-host validation or fallback is introduced on the launch
+path.
+
+## Qualified vLLM Route
+
+The vLLM 0.24 adapter is opt-in with
+`LOOM_KERNELS_ENABLE_PAGED_DECODE_ATTENTION=1` or explicit
+`register_vllm_paged_decode_attention()`. It replaces
+`FlashAttentionImpl.forward` only for the measured envelope:
+
+- FP16 or BF16 native KV cache;
+- Hq/Hkv `32/8`, query/value head size 128, block size 16 or 32;
+- one causal decoder query per active sequence, batch 1-128;
+- maximum sequence length 1-32;
+- no sliding window, ALiBi, soft cap, sinks, cascade/common prefix,
+  quantized KV, KV sharing, multimodal prefix mask, or DCP.
+
+FA3's AOT scheduler tensor is an execution hint and does not block Loom; the
+adapter still rejects every semantic feature outside the list above. All
+other calls execute the original vLLM method. This is a version-gated engine
+integration, not a new global attention backend.
 
 ## Qualification Sequence
 
@@ -81,19 +104,28 @@ fallback is introduced on the launch path.
 6. H20 comparison against the engine-selected FA3/FlashInfer implementation;
 7. real-model TPOT, throughput, and KV-memory evidence.
 
-Steps 1-4 and the operator-level part of step 6 are complete. Randomized
+Steps 1-6 are complete for the narrow route above. Randomized
 PyTorch tests cover MQA/GQA, partial final blocks, shuffled physical blocks,
 odd head sizes, distinct value widths, F32/FP16/BF16, external streams,
-FakeTensor/schema,
-`torch.compile`, and launch telemetry. On NVIDIA H20 all 22 focused tests and
-the 150-test Python suite pass.
+FakeTensor/schema, `torch.compile`, CUDA Graph replay, vLLM-interleaved cache
+strides, and launch telemetry. On NVIDIA H20 all 25 focused paged-decode tests,
+47 combined paged-decode/vLLM tests, and the 156-test Python suite pass.
 
-The named BF16 FA3 matrix establishes a narrow performance envelope rather
-than a blanket replacement. CUDA Graph speedups at contexts 16/32 are
-`1.42x/1.32x`, `1.45x/1.28x`, and `2.04x/2.16x` for batches 1, 8, and 32.
-Batch 32 remains `1.38x` ahead at context 64, while batches 1/8 are
-`0.88x/0.88x`. By context 128 all three batches lose (`0.55x`, `0.55x`, and
-`0.80x`). Therefore step 5 remains open and vLLM automatic routing is
-intentionally not enabled. The next qualification work broadens head/layout
-shapes around the 32/64-token crossover; a split-K/LSE design targets 128+
-tokens before an explicit measured-shape fallback and real-model gate.
+The native-interleaved 156-case shape sweep establishes why the route is
+narrow: 82 cases beat FA3 and 74 lose. A focused 132-case Hq/Hkv `32/8`
+qualification covers FP16/BF16, block 16/32, and batches 1-128. Every
+context-16 case reaches at least `1.42x` and every context-32 case at least
+`1.15x`; context 64 is mixed. Through the real vLLM method boundary, all 24
+admitted cases win (`1.15-2.37x`, median `1.49x`, CUDA Graph), while all 12
+context-64 cases fall back with a `1.001x` median graph ratio.
+
+A one-layer stable-output synthetic Qwen2 gate proves actual `LLM.generate`,
+FA3 metadata, native interleaved cache, compilation, and CUDA Graph path hits:
+baseline processes record zero Loom submissions, Loom processes record 18,
+and generated tokens match. The fixture keeps nonzero Q/K/V projections but
+zeros the attention/MLP output projections and makes token zero a stable LM
+head winner; it is intentionally a path gate, not pretrained-model numerical
+evidence. Order-reversed end-to-end ratios are not stable enough for a
+model-level claim. Step 7 therefore remains open for a pretrained model and
+serving workload. The next kernel work broadens model geometries and adds a
+tiled or split-K/LSE path for 128-1,024 tokens.

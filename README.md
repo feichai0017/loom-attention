@@ -56,9 +56,12 @@ execution, or lower dispatch overhead can create measurable engine value.
   decode batches falling back to vLLM;
 - paged MQA/GQA decode attention spans Rust contract/oracle, safe Rust/C ABI,
   handwritten F32/FP16/BF16 CUDA, and a current-stream PyTorch out API. Its
-  GQA path reuses paged K/V loads across two or four query heads. On H20 it
-  beats vLLM FA3 through context 32 at batches 1/8 and through context 64 at
-  batch 32; context 128 still loses, so automatic routing remains disabled;
+  GQA path reuses paged K/V loads across two or four query heads and reads
+  vLLM's native interleaved K/V views without materialization. An opt-in vLLM
+  0.24 route admits only measured FP16/BF16 Hq/Hkv `32/8`, head-size 128,
+  block-size 16/32, batch 1-128, context 1-32 decode shapes and otherwise calls
+  FA3. All 24 admitted backend cases win on H20 (`1.15-2.37x` CUDA Graph), while
+  a real synthetic-Qwen generate gate proves path hits and exact stable tokens;
 
 ## Workspace
 
@@ -81,7 +84,7 @@ execution, or lower dispatch overhead can create measurable engine value.
 | P0 | RoPE+KV write, KV append/layout/quantization | removes extra HBM passes around KV-cache updates |
 | P0 | SwiGLU/GELU fused epilogues | combines activation, multiply, bias, and quantization |
 | P0 | sampling and selected-token logprob | reduces decode-tail launches and temporary tensors |
-| P1 | paged decode attention | GQA-packed short-context CUDA is qualified; broaden shapes before a measured engine route |
+| P1 | paged decode attention | native-cache short-context vLLM route is qualified; broaden heads and build the 128+ token path |
 | P1 | MoE top-k, permutation, grouped dispatch | routing and movement often dominate small expert batches |
 | P1 | quantized GEMM epilogues | wrap vendor GEMM and own the fusion, not another basic GEMM |
 | P2 | communication-aware fusions | RMSNorm/all-reduce and TP epilogues after single-GPU evidence |
@@ -199,7 +202,25 @@ PYTHONPATH=python/src .venv-vllm/bin/python benchmarks/vllm_rope_paged_kv.py \
 PYTHONPATH=python/src .venv-vllm/bin/python \
   benchmarks/vllm_paged_decode_attention.py \
   --dtype bf16 --batches 1,8,32 --contexts 16,32,64,128,256,512 \
+  --cache-storage vllm-interleaved \
   --warmup 30 --iterations 200 --samples 7
+
+PYTHONPATH=python/src .venv-vllm/bin/python \
+  benchmarks/vllm_paged_decode_backend.py \
+  --batches 1,8,32 --contexts 16,32,64 \
+  --dtypes bf16,f16 --block-sizes 16,32
+
+.venv-vllm/bin/python benchmarks/create_synthetic_qwen2.py \
+  --output build/synthetic-qwen2-h4096-l1-stable --layers 1 \
+  --hidden-size 4096 --intermediate-size 4096 \
+  --attention-heads 32 --kv-heads 8 --max-position-embeddings 64 \
+  --stable-token-zero
+
+PYTHONPATH=python/src .venv-vllm/bin/python \
+  benchmarks/vllm_engine_paged_decode.py \
+  --model build/synthetic-qwen2-h4096-l1-stable \
+  --case 1x16x16 --case 8x16x16 --case 32x16x16 \
+  --provider-order baseline-first
 
 .venv-vllm/bin/python benchmarks/vllm_engine_rope_paged_kv.py \
   --model /path/to/Qwen2.5-0.5B-Instruct \
@@ -298,14 +319,29 @@ blanket replacement. A separate
 measures `1.35x` at 32 rows and `2.35x` at 128 rows, validating the lower
 vocabulary gate.
 
-The paged-decode
-[operator report](docs/results/h20-paged-decode-attention-20260722.json)
-compares the GQA-packed handwritten kernel directly with vLLM 0.24 FA3 over
-batch 1/8/32 and context 16-512. CUDA Graph ratios at contexts 16/32 are
-`1.42x/1.32x` for batch 1, `1.45x/1.28x` for batch 8, and
-`2.04x/2.16x` for batch 32. Batch 32 also reaches `1.38x` at context 64;
-context 128 falls to `0.55x/0.55x/0.80x`. This admits a measured short-context
-candidate, not a blanket replacement for the engine backend.
+The original paged-decode
+[operator report](docs/results/h20-paged-decode-attention-20260722.json) is the
+separate-cache bring-up. The native-layout
+[156-case shape sweep](docs/results/h20-paged-decode-interleaved-shape-sweep-20260722.json)
+uses the actual `[blocks, 2, block, Hkv, D]` vLLM storage: only 82 cases beat
+FA3 and 74 lose, so no geometry-wide claim is valid. The focused
+[132-case Qwen-shape sweep](docs/results/h20-paged-decode-qwen-batch-sweep-20260722.json)
+then qualifies FP16/BF16, block 16/32, batches 1-128: every context-16 case is
+at least `1.42x` and every context-32 case at least `1.15x`, while context 64
+is mixed.
+
+The opt-in
+[vLLM backend report](docs/results/h20-vllm-paged-decode-backend-20260722.json)
+therefore routes exactly that context-32-and-below envelope. All 24 admitted
+cases beat `FlashAttentionImpl.forward` (`1.15-2.37x`, median `1.49x`, CUDA
+Graph); all 12 context-64 cases fall back with a `1.001x` median graph ratio.
+The order-reversed synthetic-Qwen
+[baseline-first](docs/results/h20-vllm-paged-decode-engine-baseline-first-20260722.json)
+and [Loom-first](docs/results/h20-vllm-paged-decode-engine-loom-first-20260722.json)
+gates record zero/18 process-local Loom submissions and exact stable tokens.
+The fixture masks nonzero Q/K/V work behind a zero downstream projection;
+its end-to-end ratios remain order-sensitive and cross parity. This closes
+engine invocation—not pretrained-model numerics or serving-level acceleration.
 
 For the Python build and engine configuration, see the
 [vLLM IR provider guide](docs/guides/vllm-ir-provider.md).

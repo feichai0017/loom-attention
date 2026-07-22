@@ -47,10 +47,12 @@ import { evidence, repositoryUrl } from "../data/site";
         selected-token path reaches 2.77–3.78× while leaving sampling policy
         with vLLM. Min-P crosses from a small-batch regression to 1.10× at 32
         rows and 1.89× at 128 rows, so its adapter routes smaller shapes back
-        to vLLM instead of applying a blanket override. GQA-packed paged decode
-        reaches 1.32×/1.28×/2.16× at context 32 for batches 1/8/32 and 1.38×
-        at context 64 for batch 32, but every tested batch loses by context
-        128; no automatic attention route is admitted from that narrow matrix.
+        to vLLM instead of applying a blanket override. Native-interleaved
+        paged decode is similarly shape-gated: all 24 routed Hq/Hkv 32/8,
+        D128, context-at-most-32 backend cases win at 1.15–2.37×, while the
+        context-64 controls fall back to FA3 at graph parity. A broader
+        156-case sweep still contains 74 losses, so this is not a blanket
+        attention replacement.
       </p>
 
       <h2>Validation ladder</h2>
@@ -95,7 +97,23 @@ python benchmarks/vllm_silu_and_mul_dynamic_fp8.py \
 .venv-vllm/bin/python benchmarks/vllm_paged_decode_attention.py \
   --batches 1,8,32 --contexts 16,32,64,128,256,512 \
   --dtype bf16 --query-heads 32 --kv-heads 8 --head-size 128 \
+  --cache-storage vllm-interleaved \
   --warmup 30 --iterations 200 --samples 7
+
+.venv-vllm/bin/python benchmarks/vllm_paged_decode_backend.py \
+  --batches 1,8,32 --contexts 16,32,64 \
+  --dtypes bf16,f16 --block-sizes 16,32
+
+.venv-vllm/bin/python benchmarks/create_synthetic_qwen2.py \
+  --output build/synthetic-qwen2-h4096-l1-stable --layers 1 \
+  --hidden-size 4096 --intermediate-size 4096 \
+  --attention-heads 32 --kv-heads 8 --max-position-embeddings 64 \
+  --stable-token-zero
+
+.venv-vllm/bin/python benchmarks/vllm_engine_paged_decode.py \
+  --model build/synthetic-qwen2-h4096-l1-stable \
+  --case 1x16x16 --case 8x16x16 --case 32x16x16 \
+  --provider-order baseline-first
 
 .venv-vllm/bin/python benchmarks/vllm_engine_greedy_logprobs.py \
   --model /path/to/Qwen2.5-0.5B-Instruct --sampling-mode top-k-top-p \
@@ -126,6 +144,15 @@ python benchmarks/vllm_silu_and_mul_dynamic_fp8.py \
         matched every token and rank within 1.20e-6, with 1440 Loom launches
         only on the candidate side. Batch-latency ratios were 1.044–1.125× and
         TPOT ratios were 1.054–1.130×.
+      </p>
+      <p>
+        The paged-decode synthetic-Qwen gate uses a stable-output, one-layer
+        32/8-head fixture. Both provider orders match tokens; baseline
+        processes record zero Loom submissions and Loom processes record 18.
+        Its nonzero Q/K/V work is masked by a zero downstream projection and a
+        stable token-zero LM head. End-to-end ratios remain process-order
+        sensitive, so this proves the real engine and CUDA Graph path—not
+        pretrained-model numerics or acceleration.
       </p>
       <p>
         Machine-readable reports are versioned in{" "}

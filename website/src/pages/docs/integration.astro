@@ -93,6 +93,18 @@ engine = LLM(
         order.
       </p>
 
+      <h2>vLLM paged-decode fast path</h2>
+      <pre><code>LOOM_KERNELS_ENABLE_PAGED_DECODE_ATTENTION=1 python your_service.py</code></pre>
+      <p>
+        The vLLM 0.24 override reads native interleaved KV storage without a
+        copy. Loom is selected only for FP16/BF16 Hq/Hkv 32/8, D128, block
+        size 16/32, one-token causal decode, batch at most 128, and context at
+        most 32. Every other shape or semantic feature executes the original
+        FA3 method. All 24 routed H20 backend cases win; a synthetic-Qwen
+        engine gate proves path hits and exact stable tokens, while a
+        pretrained-model performance gate remains open.
+      </p>
+
       <h2>Graph-visible boundary</h2>
       <p>
         vLLM's automatic H20 path folds activation quantization into its

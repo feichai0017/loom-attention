@@ -65,7 +65,7 @@ export const supportedOperators = [
   {
     name: "Paged MQA/GQA decode",
     dtypes: "F32 · FP16 · BF16",
-    boundary: "GQA head packing + native paged-KV reads",
+    boundary: "GQA packing + native interleaved paged-KV reads; shape-gated vLLM route",
     status: "supported",
   },
 ];
@@ -81,7 +81,7 @@ export const nextOperators = [
   },
   {
     name: "Paged decode 128+",
-    reason: "Add split-K/LSE kernels and broaden shapes before an explicit FA3 fallback route.",
+    reason: "Extend the qualified context-32 FA3 fallback route with broader heads and split-K/LSE kernels.",
   },
 ];
 
@@ -136,8 +136,8 @@ export const evidence = [
   },
   {
     operator: "Paged MQA/GQA decode",
-    shape: "BF16 · Hq/Hkv 32/8 · 16–64 tokens",
-    result: "1.28–2.16×",
-    detail: "Winning CUDA Graph shapes vs FA3; all batches lose by 128 tokens",
+    shape: "FP16/BF16 · Hq/Hkv 32/8 · context ≤ 32",
+    result: "1.15–2.37×",
+    detail: "24/24 routed vLLM backend cases win; other shapes fall back to FA3",
   },
 ];

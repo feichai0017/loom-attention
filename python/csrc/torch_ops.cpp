@@ -30,6 +30,18 @@ bool byte_ranges_overlap(const at::Tensor& left, const at::Tensor& right) {
   return left_begin < right_end && right_begin < left_end;
 }
 
+bool has_dense_nhd_inner_strides(const at::Tensor& tensor) {
+  if (tensor.dim() != 4) {
+    return false;
+  }
+  const int64_t block_elements =
+      tensor.size(1) * tensor.size(2) * tensor.size(3);
+  return tensor.stride(3) == 1 &&
+         tensor.stride(2) == tensor.size(3) &&
+         tensor.stride(1) == tensor.size(2) * tensor.size(3) &&
+         tensor.stride(0) >= block_elements;
+}
+
 void check_contract(const at::Tensor& input, const at::Tensor& residual,
                     const at::Tensor& weight, double epsilon) {
   TORCH_CHECK(input.is_cuda(), "Loom Add+RMSNorm input must be CUDA");
@@ -882,10 +894,13 @@ void check_paged_decode_attention_contract(
                   output.size(1) == query.size(1) &&
                   output.size(2) == value_cache.size(3),
               "Loom paged decode output must have shape [B, Hq, Dv]");
-  TORCH_CHECK(query.is_contiguous() && key_cache.is_contiguous() &&
-                  value_cache.is_contiguous() && block_tables.is_contiguous() &&
+  TORCH_CHECK(query.is_contiguous() &&
+                  has_dense_nhd_inner_strides(key_cache) &&
+                  has_dense_nhd_inner_strides(value_cache) &&
+                  block_tables.is_contiguous() &&
                   sequence_lengths.is_contiguous() && output.is_contiguous(),
-              "Loom paged decode tensors must be contiguous");
+              "Loom paged decode requires contiguous query/output/metadata "
+              "and dense-inner NHD caches with an optional block stride");
   TORCH_CHECK(max_sequence_length > 0 && max_sequence_length <= 1024 &&
                   max_sequence_length <=
                       block_tables.size(1) * key_cache.size(1),
@@ -930,6 +945,10 @@ void launch_paged_decode_attention(
   const auto value_head_size = static_cast<uint32_t>(value_cache.size(3));
   const auto num_blocks = static_cast<uint32_t>(key_cache.size(0));
   const auto block_size = static_cast<uint32_t>(key_cache.size(1));
+  const auto key_block_stride =
+      static_cast<uint64_t>(key_cache.stride(0));
+  const auto value_block_stride =
+      static_cast<uint64_t>(value_cache.stride(0));
   const auto max_blocks_per_sequence =
       static_cast<uint32_t>(block_tables.size(1));
   const auto max_context = static_cast<uint32_t>(max_sequence_length);
@@ -944,8 +963,8 @@ void launch_paged_decode_attention(
         value_cache.data_ptr<float>(), block_tables.data_ptr<int32_t>(),
         sequence_lengths.data_ptr<int32_t>(), output.data_ptr<float>(),
         sequences, query_heads, kv_heads, head_size, value_head_size,
-        num_blocks, block_size, max_blocks_per_sequence, max_context,
-        scale_f32, stream.stream());
+        num_blocks, block_size, key_block_stride, value_block_stride,
+        max_blocks_per_sequence, max_context, scale_f32, stream.stream());
   } else if (query.scalar_type() == at::kHalf) {
     status = loom_cuda_paged_decode_attention_f16(
         reinterpret_cast<const uint16_t*>(query.data_ptr<at::Half>()),
@@ -955,8 +974,8 @@ void launch_paged_decode_attention(
         sequence_lengths.data_ptr<int32_t>(),
         reinterpret_cast<uint16_t*>(output.data_ptr<at::Half>()), sequences,
         query_heads, kv_heads, head_size, value_head_size, num_blocks,
-        block_size, max_blocks_per_sequence, max_context, scale_f32,
-        stream.stream());
+        block_size, key_block_stride, value_block_stride,
+        max_blocks_per_sequence, max_context, scale_f32, stream.stream());
   } else if (query.scalar_type() == at::kBFloat16) {
     status = loom_cuda_paged_decode_attention_bf16(
         reinterpret_cast<const uint16_t*>(query.data_ptr<at::BFloat16>()),
@@ -968,8 +987,8 @@ void launch_paged_decode_attention(
         sequence_lengths.data_ptr<int32_t>(),
         reinterpret_cast<uint16_t*>(output.data_ptr<at::BFloat16>()),
         sequences, query_heads, kv_heads, head_size, value_head_size,
-        num_blocks, block_size, max_blocks_per_sequence, max_context,
-        scale_f32, stream.stream());
+        num_blocks, block_size, key_block_stride, value_block_stride,
+        max_blocks_per_sequence, max_context, scale_f32, stream.stream());
   }
   TORCH_CHECK(status == LOOM_CUDA_SUCCESS,
               "Loom CUDA paged decode attention launch failed: ",

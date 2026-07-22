@@ -14,6 +14,8 @@ from loom_kernels.vllm import (
     GREEDY_SAMPLE_LOGPROBS_OVERRIDE_KEY,
     MIN_P_OVERRIDE_ENV,
     MIN_P_OVERRIDE_KEY,
+    PAGED_DECODE_OVERRIDE_ENV,
+    PAGED_DECODE_OVERRIDE_KEY,
     ROPE_PAGED_KV_OVERRIDE_KEY,
     SELECTED_TOKEN_LOGPROBS_OVERRIDE_KEY,
     SILU_OVERRIDE_ENV,
@@ -22,11 +24,13 @@ from loom_kernels.vllm import (
     provider_metadata,
     register_vllm_ir,
     register_vllm_min_p,
+    register_vllm_paged_decode_attention,
     register_vllm_greedy_sample_logprobs,
     register_vllm_rope_paged_kv,
     register_vllm_selected_token_logprobs,
     register_vllm_silu_and_mul,
     register_vllm_silu_and_mul_dynamic_fp8,
+    supports_vllm_paged_decode_shape,
 )
 
 
@@ -209,6 +213,119 @@ def test_configures_vllm_rope_paged_kv_fusion():
         "loom_kernels.vllm"
     )
     assert provider_metadata()["rope_paged_kv_override"] is True
+
+
+def test_vllm_paged_decode_shape_gate_is_conservative():
+    qualified = {
+        "dtype": torch.bfloat16,
+        "batch": 32,
+        "query_heads": 32,
+        "kv_heads": 8,
+        "head_size": 128,
+        "block_size": 16,
+        "max_sequence_length": 32,
+    }
+    assert supports_vllm_paged_decode_shape(**qualified)
+    for field, rejected in (
+        ("dtype", torch.float32),
+        ("batch", 129),
+        ("query_heads", 64),
+        ("kv_heads", 4),
+        ("head_size", 64),
+        ("block_size", 8),
+        ("max_sequence_length", 64),
+    ):
+        candidate = {**qualified, field: rejected}
+        assert not supports_vllm_paged_decode_shape(**candidate)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_vllm_paged_decode_fast_path_matches_flash_attention():
+    from vllm.v1.attention.backends.flash_attn import (
+        FlashAttentionImpl,
+        FlashAttentionMetadata,
+    )
+
+    from loom_kernels.torch_ops import (
+        paged_decode_attention_launch_count,
+        reset_paged_decode_attention_launch_count,
+    )
+
+    batch = 8
+    context = 32
+    block_size = 16
+    max_blocks = context // block_size
+    num_blocks = batch * max_blocks
+    query = torch.randn((batch, 32, 128), device="cuda", dtype=torch.bfloat16)
+    key = torch.empty((batch, 8, 128), device="cuda", dtype=query.dtype)
+    value = torch.empty_like(key)
+    kv_cache = torch.randn(
+        (num_blocks, 2, block_size, 8, 128),
+        device="cuda",
+        dtype=query.dtype,
+    )
+    block_table = torch.randperm(num_blocks, device="cuda", dtype=torch.int64)
+    block_table = block_table.reshape(batch, max_blocks).to(torch.int32)
+    seq_lens = torch.full((batch,), context, device="cuda", dtype=torch.int32)
+    metadata = FlashAttentionMetadata(
+        num_actual_tokens=batch,
+        max_query_len=1,
+        query_start_loc=torch.arange(batch + 1, device="cuda", dtype=torch.int32),
+        max_seq_len=context,
+        seq_lens=seq_lens,
+        block_table=block_table,
+        slot_mapping=torch.arange(batch, device="cuda", dtype=torch.int64),
+        use_cascade=False,
+        common_prefix_len=0,
+        cu_prefix_query_lens=None,
+        prefix_kv_lens=None,
+        suffix_kv_lens=None,
+    )
+    attention = FlashAttentionImpl(
+        num_heads=32,
+        head_size=128,
+        scale=128**-0.5,
+        num_kv_heads=8,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+    )
+    scale = torch.ones((), device="cuda", dtype=torch.float32)
+    layer = SimpleNamespace(_q_scale=scale, _k_scale=scale, _v_scale=scale)
+    expected = torch.empty((batch, 32, 128), device="cuda", dtype=query.dtype)
+    attention.forward(
+        layer, query, key, value, kv_cache, metadata, expected
+    )
+    # Real FA3 decode metadata carries an AOT scheduler tensor and represents
+    # the inactive DCP context length as zero. Neither changes attention
+    # semantics, so Loom must not reject the otherwise qualified path.
+    metadata.max_dcp_context_kv_len = 0
+    metadata.scheduler_metadata = torch.zeros(
+        (1,), device="cuda", dtype=torch.int32
+    )
+
+    assert (
+        register_vllm_paged_decode_attention()
+        == PAGED_DECODE_OVERRIDE_KEY
+    )
+    reset_paged_decode_attention_launch_count()
+    actual = torch.empty_like(expected)
+    returned = attention.forward(
+        layer, query, key, value, kv_cache, metadata, actual
+    )
+    torch.cuda.synchronize()
+
+    assert returned is actual
+    assert paged_decode_attention_launch_count() == 1
+    torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
+    assert provider_metadata()["paged_decode_override"] is True
+
+
+def test_paged_decode_override_metadata_tracks_opt_in(monkeypatch):
+    monkeypatch.delenv(PAGED_DECODE_OVERRIDE_ENV, raising=False)
+    assert provider_metadata()["paged_decode_override_requested"] is False
+    monkeypatch.setenv(PAGED_DECODE_OVERRIDE_ENV, "true")
+    assert provider_metadata()["paged_decode_override_requested"] is True
 
 
 def test_registers_inplace_fused_add_rms_norm_provider():

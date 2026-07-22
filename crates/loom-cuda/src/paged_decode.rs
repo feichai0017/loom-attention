@@ -44,6 +44,8 @@ impl CudaBackend {
                 shape.value_head_size,
                 shape.num_blocks,
                 shape.block_size,
+                shape.key_block_stride,
+                shape.value_block_stride,
                 shape.max_blocks_per_sequence,
                 shape.max_sequence_length,
                 spec.scale(),
@@ -89,6 +91,8 @@ impl CudaBackend {
                 shape.value_head_size,
                 shape.num_blocks,
                 shape.block_size,
+                shape.key_block_stride,
+                shape.value_block_stride,
                 shape.max_blocks_per_sequence,
                 shape.max_sequence_length,
                 spec.scale(),
@@ -134,6 +138,8 @@ impl CudaBackend {
                 shape.value_head_size,
                 shape.num_blocks,
                 shape.block_size,
+                shape.key_block_stride,
+                shape.value_block_stride,
                 shape.max_blocks_per_sequence,
                 shape.max_sequence_length,
                 spec.scale(),
@@ -180,6 +186,8 @@ struct AbiShape {
     value_head_size: u32,
     num_blocks: u32,
     block_size: u32,
+    key_block_stride: u64,
+    value_block_stride: u64,
     max_blocks_per_sequence: u32,
     max_sequence_length: u32,
 }
@@ -215,6 +223,10 @@ fn validate_buffers<T: Copy>(
         u32::try_from(value)
             .map_err(|_| CudaExecutorError::InvalidContract(format!("{name} exceeds the CUDA ABI")))
     };
+    let u64_value = |value: usize, name: &str| {
+        u64::try_from(value)
+            .map_err(|_| CudaExecutorError::InvalidContract(format!("{name} exceeds the CUDA ABI")))
+    };
     Ok(AbiShape {
         sequences: u32_value(spec.sequences(), "sequence count")?,
         query_heads: u32_value(spec.query_heads(), "query head count")?,
@@ -223,6 +235,14 @@ fn validate_buffers<T: Copy>(
         value_head_size: u32_value(spec.value_head_size(), "value head size")?,
         num_blocks: u32_value(spec.num_blocks(), "cache block count")?,
         block_size: u32_value(spec.block_size(), "cache block size")?,
+        key_block_stride: u64_value(
+            spec.key_cache_numel() / spec.num_blocks(),
+            "key cache block stride",
+        )?,
+        value_block_stride: u64_value(
+            spec.value_cache_numel() / spec.num_blocks(),
+            "value cache block stride",
+        )?,
         max_blocks_per_sequence: u32_value(
             spec.max_blocks_per_sequence(),
             "maximum blocks per sequence",

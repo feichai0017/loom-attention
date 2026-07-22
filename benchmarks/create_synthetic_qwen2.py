@@ -17,6 +17,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vocab-size", type=int, default=1024)
     parser.add_argument("--max-position-embeddings", type=int, default=512)
     parser.add_argument("--seed", type=int, default=29)
+    parser.add_argument(
+        "--stable-token-zero",
+        action="store_true",
+        help=(
+            "keep nonzero Q/K/V projections but zero their output projection "
+            "and make token 0 a deterministic generation winner"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -39,6 +47,9 @@ def main() -> None:
         bos_token_id=1,
         eos_token_id=2,
     )
+    config.loom_fixture = (
+        "stable-token-zero" if args.stable_token_zero else "random-weights"
+    )
     original_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
     try:
@@ -46,6 +57,17 @@ def main() -> None:
     finally:
         torch.set_default_dtype(original_dtype)
     model.eval()
+    if args.stable_token_zero:
+        with torch.no_grad():
+            model.model.embed_tokens.weight.fill_(1.0)
+            model.model.norm.weight.fill_(1.0)
+            model.lm_head.weight.zero_()
+            model.lm_head.weight[0].fill_(1.0)
+            for layer in model.model.layers:
+                layer.input_layernorm.weight.fill_(1.0)
+                layer.post_attention_layernorm.weight.fill_(1.0)
+                layer.self_attn.o_proj.weight.zero_()
+                layer.mlp.down_proj.weight.zero_()
     args.output.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(args.output, safe_serialization=True, max_shard_size="2GB")
     parameters = sum(parameter.numel() for parameter in model.parameters())
@@ -54,6 +76,7 @@ def main() -> None:
             "output": str(args.output.resolve()),
             "parameters": parameters,
             "storage_dtype": str(next(model.parameters()).dtype),
+            "stable_token_zero": args.stable_token_zero,
         }
     )
 

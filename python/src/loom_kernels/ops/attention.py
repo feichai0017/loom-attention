@@ -12,6 +12,21 @@ from ._common import _DTYPE_NAMES
 PAGED_DECODE_MAX_CONTEXT = 1024
 
 
+def _has_dense_nhd_inner_strides(tensor: torch.Tensor) -> bool:
+    """Return whether only the outer cache-block stride may contain gaps."""
+    if tensor.dim() != 4:
+        return False
+    _, block_size, heads, width = tensor.shape
+    block_elements = block_size * heads * width
+    return bool(
+        tensor.stride(3) == 1
+        and tensor.stride(2) == width
+        and tensor.stride(1) == heads * width
+        and tensor.stride(0) >= block_elements
+        and tensor.stride(0) <= 0xFFFF_FFFF_FFFF_FFFF
+    )
+
+
 def _dispatch():
     from .. import _torch_dispatch
 
@@ -27,7 +42,7 @@ def supports_paged_decode_attention(
     *,
     max_sequence_length: int,
 ) -> bool:
-    """Return whether tensors match the first native paged-decode kernel."""
+    """Return whether tensors match the native paged-decode kernel family."""
     if (
         query.dim() != 3
         or key_cache.dim() != 4
@@ -55,8 +70,8 @@ def supports_paged_decode_attention(
         and block_tables.dtype == torch.int32
         and sequence_lengths.dtype == torch.int32
         and query.is_contiguous()
-        and key_cache.is_contiguous()
-        and value_cache.is_contiguous()
+        and _has_dense_nhd_inner_strides(key_cache)
+        and _has_dense_nhd_inner_strides(value_cache)
         and block_tables.is_contiguous()
         and sequence_lengths.is_contiguous()
         and head_size == key_head_size
@@ -104,10 +119,11 @@ def _validate_paged_decode_attention(
         max_sequence_length=max_sequence_length,
     ):
         raise ValueError(
-            "Loom paged decode attention requires contiguous same-device "
-            "F32/FP16/BF16 query [B,Hq,D], native NHD K/V caches, int32 "
-            "block tables/sequence lengths, Hq divisible by Hkv, and "
-            "max_sequence_length in [1, 1024]"
+            "Loom paged decode attention requires a contiguous same-device "
+            "F32/FP16/BF16 query [B,Hq,D], dense-inner NHD K/V caches with "
+            "an optional outer block stride, int32 block tables/sequence "
+            "lengths, Hq divisible by Hkv, and max_sequence_length in "
+            "[1, 1024]"
         )
     if output.device != query.device or output.dtype != query.dtype:
         raise ValueError("paged decode output must share query device and dtype")
@@ -144,6 +160,8 @@ def _validate_paged_decode_attention(
         value_cache.shape[3],
         key_cache.shape[0],
         key_cache.shape[1],
+        key_cache.stride(0),
+        value_cache.stride(0),
         block_tables.shape[1],
         max_sequence_length,
     )

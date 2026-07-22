@@ -154,18 +154,22 @@ int loom_cuda_min_p_filter_bf16(uint16_t* logits, const float* min_p,
 
 // Base paged MQA/GQA decode attention for one query token per sequence.
 // Query/output are contiguous [sequences, query_heads, dim]; native K/V
-// caches are contiguous NHD [blocks, block_size, kv_heads, dim]. Block tables
-// and sequence lengths are contiguous int32 engine metadata. Sequence lengths
-// include the current token and are trusted to be in [1, max_sequence_length];
-// active block IDs are trusted to be in [0, num_blocks). This kernel family is
-// intentionally limited to max_sequence_length <= 1024 and does not implement
-// ALiBi, sliding windows, soft caps, quantized KV, or multi-token queries.
+// caches have dense inner NHD [block_size, kv_heads, dim] dimensions and an
+// explicit element stride between blocks. This accepts both separate caches
+// and K/V views of vLLM's interleaved [blocks, 2, block_size, kv_heads, dim]
+// storage. Block tables and sequence lengths are contiguous int32 engine
+// metadata. Sequence lengths include the current token and are trusted to be
+// in [1, max_sequence_length]; active block IDs are trusted to be in
+// [0, num_blocks). This kernel family is intentionally limited to
+// max_sequence_length <= 1024 and does not implement ALiBi, sliding windows,
+// soft caps, quantized KV, or multi-token queries.
 int loom_cuda_paged_decode_attention_f32(
     const float* query, const float* key_cache, const float* value_cache,
     const int32_t* block_tables, const int32_t* sequence_lengths,
     float* output, uint32_t sequences, uint32_t query_heads,
     uint32_t kv_heads, uint32_t head_size, uint32_t value_head_size,
-    uint32_t num_blocks, uint32_t block_size,
+    uint32_t num_blocks, uint32_t block_size, uint64_t key_block_stride,
+    uint64_t value_block_stride,
     uint32_t max_blocks_per_sequence, uint32_t max_sequence_length,
     float scale, void* stream);
 
@@ -175,6 +179,7 @@ int loom_cuda_paged_decode_attention_f16(
     const int32_t* sequence_lengths, uint16_t* output, uint32_t sequences,
     uint32_t query_heads, uint32_t kv_heads, uint32_t head_size,
     uint32_t value_head_size, uint32_t num_blocks, uint32_t block_size,
+    uint64_t key_block_stride, uint64_t value_block_stride,
     uint32_t max_blocks_per_sequence, uint32_t max_sequence_length,
     float scale, void* stream);
 
@@ -184,6 +189,7 @@ int loom_cuda_paged_decode_attention_bf16(
     const int32_t* sequence_lengths, uint16_t* output, uint32_t sequences,
     uint32_t query_heads, uint32_t kv_heads, uint32_t head_size,
     uint32_t value_head_size, uint32_t num_blocks, uint32_t block_size,
+    uint64_t key_block_stride, uint64_t value_block_stride,
     uint32_t max_blocks_per_sequence, uint32_t max_sequence_length,
     float scale, void* stream);
 

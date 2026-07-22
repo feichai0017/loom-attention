@@ -76,6 +76,7 @@ __global__ void paged_decode_attention_kernel(
     const int32_t* sequence_lengths, typename Ops::Scalar* output,
     uint32_t query_heads, uint32_t kv_heads, uint32_t head_size,
     uint32_t value_head_size, uint32_t block_size,
+    uint64_t key_block_stride, uint64_t value_block_stride,
     uint32_t max_blocks_per_sequence, float scale) {
   const uint32_t sequence_head = blockIdx.x;
   const uint32_t sequence = sequence_head / query_heads;
@@ -105,10 +106,8 @@ __global__ void paged_decode_attention_kernel(
     const uint32_t physical_block =
         static_cast<uint32_t>(block_tables[table_offset + logical_block]);
     const size_t key_offset =
-        ((static_cast<size_t>(physical_block) * block_size + block_offset) *
-             kv_heads +
-         kv_head) *
-        head_size;
+        static_cast<size_t>(physical_block) * key_block_stride +
+        (static_cast<size_t>(block_offset) * kv_heads + kv_head) * head_size;
     float partial = 0.0F;
     for (uint32_t dimension = lane; dimension < head_size;
          dimension += 32U) {
@@ -161,10 +160,9 @@ __global__ void paged_decode_attention_kernel(
       const uint32_t physical_block =
           static_cast<uint32_t>(block_tables[table_offset + logical_block]);
       const size_t value_offset =
-          ((static_cast<size_t>(physical_block) * block_size + block_offset) *
-               kv_heads +
-           kv_head) *
-          value_head_size;
+          static_cast<size_t>(physical_block) * value_block_stride +
+          (static_cast<size_t>(block_offset) * kv_heads + kv_head) *
+              value_head_size;
       accumulator += scores[position] *
                      Ops::to_float(value_cache[value_offset + dimension]);
     }
@@ -180,6 +178,7 @@ __global__ void paged_decode_attention_gqa_kernel(
     const int32_t* sequence_lengths, typename Ops::Scalar* output,
     uint32_t query_heads, uint32_t kv_heads, uint32_t head_size,
     uint32_t value_head_size, uint32_t block_size,
+    uint64_t key_block_stride, uint64_t value_block_stride,
     uint32_t max_blocks_per_sequence, uint32_t max_sequence_length,
     float scale) {
   const uint32_t queries_per_kv = query_heads / kv_heads;
@@ -200,10 +199,10 @@ __global__ void paged_decode_attention_gqa_kernel(
   const size_t score_bytes =
       static_cast<size_t>(PackedQueryHeads) * max_sequence_length *
       sizeof(float);
-  const size_t token_offset_start =
-      (score_bytes + alignof(size_t) - 1U) & ~(alignof(size_t) - 1U);
-  size_t* token_offsets =
-      reinterpret_cast<size_t*>(shared_bytes + token_offset_start);
+  const size_t block_id_start =
+      (score_bytes + alignof(uint32_t) - 1U) & ~(alignof(uint32_t) - 1U);
+  uint32_t* physical_blocks =
+      reinterpret_cast<uint32_t*>(shared_bytes + block_id_start);
   using BlockReduce = cub::BlockReduce<float, kPackedThreads>;
   __shared__ typename BlockReduce::TempStorage reduction_storage;
   __shared__ float maximum;
@@ -214,11 +213,9 @@ __global__ void paged_decode_attention_gqa_kernel(
   for (uint32_t position = threadIdx.x; position < sequence_length;
        position += kPackedThreads) {
     const uint32_t logical_block = position / block_size;
-    const uint32_t block_offset = position % block_size;
     const uint32_t physical_block =
         static_cast<uint32_t>(block_tables[table_offset + logical_block]);
-    token_offsets[position] =
-        static_cast<size_t>(physical_block) * block_size + block_offset;
+    physical_blocks[position] = physical_block;
   }
   __syncthreads();
 
@@ -227,8 +224,10 @@ __global__ void paged_decode_attention_gqa_kernel(
   for (uint32_t position = warp; position < sequence_length;
        position += kPackedWarps) {
     float partials[PackedQueryHeads] = {};
+    const uint32_t block_offset = position % block_size;
     const size_t key_offset =
-        (token_offsets[position] * kv_heads + kv_head) * head_size;
+        static_cast<size_t>(physical_blocks[position]) * key_block_stride +
+        (static_cast<size_t>(block_offset) * kv_heads + kv_head) * head_size;
     if (head_size % 2U == 0U) {
       for (uint32_t dimension = lane * 2U; dimension < head_size;
            dimension += 64U) {
@@ -313,8 +312,11 @@ __global__ void paged_decode_attention_gqa_kernel(
        dimension += kPackedThreads) {
     float accumulators[PackedQueryHeads] = {};
     for (uint32_t position = 0; position < sequence_length; ++position) {
+      const uint32_t block_offset = position % block_size;
       const size_t value_offset =
-          (token_offsets[position] * kv_heads + kv_head) * value_head_size;
+          static_cast<size_t>(physical_blocks[position]) * value_block_stride +
+          (static_cast<size_t>(block_offset) * kv_heads + kv_head) *
+              value_head_size;
       const float value =
           Ops::to_float(value_cache[value_offset + dimension]);
 #pragma unroll
@@ -357,7 +359,8 @@ int launch_paged_decode_attention(
     const int32_t* sequence_lengths, typename Ops::Scalar* output,
     uint32_t sequences, uint32_t query_heads, uint32_t kv_heads,
     uint32_t head_size, uint32_t value_head_size, uint32_t num_blocks,
-    uint32_t block_size, uint32_t max_blocks_per_sequence,
+    uint32_t block_size, uint64_t key_block_stride,
+    uint64_t value_block_stride, uint32_t max_blocks_per_sequence,
     uint32_t max_sequence_length, float scale, void* stream) {
   const uint32_t query_dimensions[] = {sequences, query_heads, head_size};
   const uint32_t output_dimensions[] = {sequences, query_heads,
@@ -372,6 +375,12 @@ int launch_paged_decode_attention(
       static_cast<uint64_t>(block_size) * max_blocks_per_sequence;
   const uint64_t grid_size =
       static_cast<uint64_t>(sequences) * query_heads;
+  const bool valid_products =
+      checked_product(query_dimensions, 3) &&
+      checked_product(output_dimensions, 3) &&
+      checked_product(key_dimensions, 4) &&
+      checked_product(value_dimensions, 4) &&
+      checked_product(table_dimensions, 2);
   if (query == nullptr || key_cache == nullptr || value_cache == nullptr ||
       block_tables == nullptr || sequence_lengths == nullptr ||
       output == nullptr || sequences == 0U || query_heads == 0U ||
@@ -382,11 +391,26 @@ int launch_paged_decode_attention(
       max_sequence_length > context_capacity || !isfinite(scale) ||
       scale <= 0.0F ||
       grid_size > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
-      !checked_product(query_dimensions, 3) ||
-      !checked_product(output_dimensions, 3) ||
-      !checked_product(key_dimensions, 4) ||
-      !checked_product(value_dimensions, 4) ||
-      !checked_product(table_dimensions, 2)) {
+      !valid_products) {
+    return LOOM_CUDA_INVALID_ARGUMENT;
+  }
+
+  const size_t key_block_elements =
+      static_cast<size_t>(block_size) * kv_heads * head_size;
+  const size_t value_block_elements =
+      static_cast<size_t>(block_size) * kv_heads * value_head_size;
+  const auto valid_block_stride = [num_blocks](uint64_t stride,
+                                                size_t block_elements) {
+    if (stride < block_elements ||
+        stride > std::numeric_limits<size_t>::max()) {
+      return false;
+    }
+    return num_blocks <= 1U ||
+           stride <= (std::numeric_limits<size_t>::max() - block_elements) /
+                         (num_blocks - 1U);
+  };
+  if (!valid_block_stride(key_block_stride, key_block_elements) ||
+      !valid_block_stride(value_block_stride, value_block_elements)) {
     return LOOM_CUDA_INVALID_ARGUMENT;
   }
 
@@ -405,18 +429,19 @@ int launch_paged_decode_attention(
     const size_t score_bytes =
         static_cast<size_t>(packed_query_heads) * max_sequence_length *
         sizeof(float);
-    const size_t token_offset_start =
-        (score_bytes + alignof(size_t) - 1U) & ~(alignof(size_t) - 1U);
+    const size_t block_id_start =
+        (score_bytes + alignof(uint32_t) - 1U) & ~(alignof(uint32_t) - 1U);
     const size_t shared_bytes =
-        token_offset_start +
-        static_cast<size_t>(max_sequence_length) * sizeof(size_t);
+        block_id_start +
+        static_cast<size_t>(max_sequence_length) * sizeof(uint32_t);
     paged_decode_attention_gqa_kernel<Ops, packed_query_heads>
         <<<static_cast<uint32_t>(packed_grid_size), kPackedThreads,
            shared_bytes,
            cuda_stream>>>(
             query, key_cache, value_cache, block_tables, sequence_lengths,
             output, query_heads, kv_heads, head_size, value_head_size,
-            block_size, max_blocks_per_sequence, max_sequence_length, scale);
+            block_size, key_block_stride, value_block_stride,
+            max_blocks_per_sequence, max_sequence_length, scale);
   } else if (max_sequence_length > kSingleHeadMaximumContext &&
              queries_per_kv % 2U == 0U) {
     constexpr uint32_t packed_query_heads = 2;
@@ -425,18 +450,19 @@ int launch_paged_decode_attention(
     const size_t score_bytes =
         static_cast<size_t>(packed_query_heads) * max_sequence_length *
         sizeof(float);
-    const size_t token_offset_start =
-        (score_bytes + alignof(size_t) - 1U) & ~(alignof(size_t) - 1U);
+    const size_t block_id_start =
+        (score_bytes + alignof(uint32_t) - 1U) & ~(alignof(uint32_t) - 1U);
     const size_t shared_bytes =
-        token_offset_start +
-        static_cast<size_t>(max_sequence_length) * sizeof(size_t);
+        block_id_start +
+        static_cast<size_t>(max_sequence_length) * sizeof(uint32_t);
     paged_decode_attention_gqa_kernel<Ops, packed_query_heads>
         <<<static_cast<uint32_t>(packed_grid_size), kPackedThreads,
            shared_bytes,
            cuda_stream>>>(
             query, key_cache, value_cache, block_tables, sequence_lengths,
             output, query_heads, kv_heads, head_size, value_head_size,
-            block_size, max_blocks_per_sequence, max_sequence_length, scale);
+            block_size, key_block_stride, value_block_stride,
+            max_blocks_per_sequence, max_sequence_length, scale);
   } else {
     const size_t shared_bytes =
         static_cast<size_t>(max_sequence_length) * sizeof(float);
@@ -445,6 +471,7 @@ int launch_paged_decode_attention(
            cuda_stream>>>(query, key_cache, value_cache, block_tables,
                           sequence_lengths, output, query_heads, kv_heads,
                           head_size, value_head_size, block_size,
+                          key_block_stride, value_block_stride,
                           max_blocks_per_sequence, scale);
   }
   return cudaGetLastError() == cudaSuccess ? LOOM_CUDA_SUCCESS
@@ -458,13 +485,15 @@ extern "C" int loom_cuda_paged_decode_attention_f32(
     const int32_t* block_tables, const int32_t* sequence_lengths,
     float* output, uint32_t sequences, uint32_t query_heads,
     uint32_t kv_heads, uint32_t head_size, uint32_t value_head_size,
-    uint32_t num_blocks, uint32_t block_size,
+    uint32_t num_blocks, uint32_t block_size, uint64_t key_block_stride,
+    uint64_t value_block_stride,
     uint32_t max_blocks_per_sequence, uint32_t max_sequence_length,
     float scale, void* stream) {
   return launch_paged_decode_attention<FloatOps>(
       query, key_cache, value_cache, block_tables, sequence_lengths, output,
       sequences, query_heads, kv_heads, head_size, value_head_size, num_blocks,
-      block_size, max_blocks_per_sequence, max_sequence_length, scale, stream);
+      block_size, key_block_stride, value_block_stride,
+      max_blocks_per_sequence, max_sequence_length, scale, stream);
 }
 
 extern "C" int loom_cuda_paged_decode_attention_f16(
@@ -473,6 +502,7 @@ extern "C" int loom_cuda_paged_decode_attention_f16(
     const int32_t* sequence_lengths, uint16_t* output, uint32_t sequences,
     uint32_t query_heads, uint32_t kv_heads, uint32_t head_size,
     uint32_t value_head_size, uint32_t num_blocks, uint32_t block_size,
+    uint64_t key_block_stride, uint64_t value_block_stride,
     uint32_t max_blocks_per_sequence, uint32_t max_sequence_length,
     float scale, void* stream) {
   return launch_paged_decode_attention<HalfOps>(
@@ -481,7 +511,8 @@ extern "C" int loom_cuda_paged_decode_attention_f16(
       reinterpret_cast<const __half*>(value_cache), block_tables,
       sequence_lengths, reinterpret_cast<__half*>(output), sequences,
       query_heads, kv_heads, head_size, value_head_size, num_blocks, block_size,
-      max_blocks_per_sequence, max_sequence_length, scale, stream);
+      key_block_stride, value_block_stride, max_blocks_per_sequence,
+      max_sequence_length, scale, stream);
 }
 
 extern "C" int loom_cuda_paged_decode_attention_bf16(
@@ -490,6 +521,7 @@ extern "C" int loom_cuda_paged_decode_attention_bf16(
     const int32_t* sequence_lengths, uint16_t* output, uint32_t sequences,
     uint32_t query_heads, uint32_t kv_heads, uint32_t head_size,
     uint32_t value_head_size, uint32_t num_blocks, uint32_t block_size,
+    uint64_t key_block_stride, uint64_t value_block_stride,
     uint32_t max_blocks_per_sequence, uint32_t max_sequence_length,
     float scale, void* stream) {
   return launch_paged_decode_attention<Bfloat16Ops>(
@@ -498,5 +530,6 @@ extern "C" int loom_cuda_paged_decode_attention_bf16(
       reinterpret_cast<const __nv_bfloat16*>(value_cache), block_tables,
       sequence_lengths, reinterpret_cast<__nv_bfloat16*>(output), sequences,
       query_heads, kv_heads, head_size, value_head_size, num_blocks, block_size,
-      max_blocks_per_sequence, max_sequence_length, scale, stream);
+      key_block_stride, value_block_stride, max_blocks_per_sequence,
+      max_sequence_length, scale, stream);
 }

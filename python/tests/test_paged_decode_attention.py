@@ -64,6 +64,7 @@ def make_case(
     block_size: int,
     lengths: list[int],
     seed: int,
+    interleaved_cache: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     torch.manual_seed(seed)
     max_sequence_length = max(lengths)
@@ -72,16 +73,26 @@ def make_case(
     query = torch.randn(
         (sequences, query_heads, head_size), device="cuda", dtype=dtype
     )
-    key_cache = torch.randn(
-        (num_blocks, block_size, kv_heads, head_size),
-        device="cuda",
-        dtype=dtype,
-    )
-    value_cache = torch.randn(
-        (num_blocks, block_size, kv_heads, value_head_size),
-        device="cuda",
-        dtype=dtype,
-    )
+    if interleaved_cache:
+        if head_size != value_head_size:
+            raise ValueError("interleaved cache requires matching K/V widths")
+        kv_cache = torch.randn(
+            (num_blocks, 2, block_size, kv_heads, head_size),
+            device="cuda",
+            dtype=dtype,
+        )
+        key_cache, value_cache = kv_cache.unbind(1)
+    else:
+        key_cache = torch.randn(
+            (num_blocks, block_size, kv_heads, head_size),
+            device="cuda",
+            dtype=dtype,
+        )
+        value_cache = torch.randn(
+            (num_blocks, block_size, kv_heads, value_head_size),
+            device="cuda",
+            dtype=dtype,
+        )
     permutation = torch.randperm(num_blocks, device="cuda", dtype=torch.int64)
     block_tables = permutation[: sequences * max_blocks].reshape(
         sequences, max_blocks
@@ -150,6 +161,53 @@ def test_paged_decode_matches_randomized_pytorch_oracle(dtype, case):
     torch.cuda.synchronize()
 
     assert adapter_backend() == "cpp-dispatch"
+    tolerance = {
+        torch.float32: (3.0e-4, 3.0e-5),
+        torch.float16: (3.0e-3, 3.0e-3),
+        torch.bfloat16: (2.0e-2, 2.0e-2),
+    }[dtype]
+    torch.testing.assert_close(
+        actual, expected, rtol=tolerance[0], atol=tolerance[1]
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_paged_decode_accepts_vllm_interleaved_kv_stride(dtype):
+    lengths = list(range(17, 33))
+    tensors = make_case(
+        dtype=dtype,
+        sequences=16,
+        query_heads=32,
+        kv_heads=8,
+        head_size=32,
+        value_head_size=32,
+        block_size=16,
+        lengths=lengths,
+        seed=353,
+        interleaved_cache=True,
+    )
+    query, key_cache, value_cache, block_tables, sequence_lengths = tensors
+    scale = query.shape[-1] ** -0.5
+    expected = reference(*tensors, scale)
+
+    assert not key_cache.is_contiguous()
+    assert key_cache.stride(0) == 2 * key_cache[0].numel()
+    assert supports_paged_decode_attention(
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        sequence_lengths,
+        max_sequence_length=max(lengths),
+    )
+    actual = paged_decode_attention(
+        *tensors,
+        max_sequence_length=max(lengths),
+        scale=scale,
+    )
+    torch.cuda.synchronize()
+
     tolerance = {
         torch.float32: (3.0e-4, 3.0e-5),
         torch.float16: (3.0e-3, 3.0e-3),

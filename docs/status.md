@@ -38,9 +38,10 @@
   tensors;
 - base paged MQA/GQA decode attention for one query per request: Rust contract
   and stable CPU oracle, F32/FP16/BF16 handwritten CUDA/C ABI, safe Rust
-  entrypoints, contiguous NHD cache indirection, distinct K/V widths, a
-  two/four-query-head GQA specialization that reuses paged K/V loads, and a
-  current-stream caller-allocated PyTorch operator capped at 1,024 tokens;
+  entrypoints, dense-inner NHD cache indirection with explicit outer block
+  strides, distinct K/V widths, a two/four-query-head GQA specialization that
+  reuses paged K/V loads, and a current-stream caller-allocated PyTorch
+  operator capped at 1,024 tokens;
 - a C++ PyTorch dispatcher bridge using the current CUDA stream;
 - a source-adapter Python wheel with explicit framework extras, project
   metadata, license/readme payloads, and a CI install/entry-point smoke gate;
@@ -48,7 +49,8 @@
   `SiluAndMul` out-of-tree layer replacement, plus an opt-in activation-quant
   fusion-table replacement, RoPE+KV compiler-pass adapter, and pure-greedy
   general selected-token sampled-logprob fast paths, and a measured-shape
-  Min-P override for vLLM 0.24;
+  Min-P override plus a native-cache short-context paged-decode override for
+  vLLM 0.24;
 - per-operator JSON correctness/latency benchmarks and named vLLM baselines.
 
 ## Validated
@@ -164,7 +166,7 @@
 - selected-token PyTorch tests cover arbitrary IDs/ranks, F32/FP16/BF16,
   Qwen's 151,936-token vocabulary, ties, padded rows, external streams,
   FakeTensor/schema validation, `torch.compile`, and CUDA Graph replay;
-- the current complete H20 Python suite passes 150 tests; the Rust core passes
+- the current complete H20 Python suite passes 156 tests; the Rust core passes
   30 contract/oracle tests, and the CUDA-feature workspace passes formatting,
   Clippy, release build, plus five safe-wrapper CPU-oracle tests;
 - against vLLM's exact `compute_logprobs + gather_logprobs(0)` path for the
@@ -184,16 +186,29 @@
   1, 8, 32, and 128 rows. The vLLM adapter therefore requires at least 32 rows
   and a 65,536-token vocabulary, falling back below either threshold. A second
   65,536-vocabulary sweep measured `1.35x` and `2.35x` at 32 and 128 rows;
-- paged-decode focused tests pass 22/22 across F32/FP16/BF16, MQA/GQA,
+- paged-decode focused tests pass 25/25 across F32/FP16/BF16, MQA/GQA,
   shuffled physical blocks, partial pages, odd head sizes, distinct value
-  widths, external streams, schema/FakeTensor, `torch.compile`, and launch
-  telemetry; the safe Rust F32 wrapper also matches the CPU oracle on H20;
-- against vLLM 0.24 FlashAttention FA3 for BF16 Qwen-style Hq/Hkv `32/8` and
-  head size 128, CUDA Graph speedups at contexts 16/32 are `1.421x/1.322x`,
-  `1.448x/1.284x`, and `2.042x/2.162x` for batches 1, 8, and 32. Batch 32 also
-  reaches `1.382x` at context 64; all three batches lose by context 128.
-  Correctness support remains available through 1,024 tokens, but no automatic
-  vLLM route is admitted from this single geometry;
+  widths, native vLLM-interleaved cache strides, external streams,
+  schema/FakeTensor, `torch.compile`, and launch telemetry; the combined
+  paged-decode/vLLM gate passes 47 tests and the safe Rust F32 wrapper matches
+  the CPU oracle on H20;
+- a 156-case native-interleaved layout sweep spans 13 dtype/head/block shapes,
+  three batches, and four contexts with maximum absolute error `0.015625`;
+  only 82 cases beat FA3 and 74 lose, confirming shape-dependent routing;
+- a focused 132-case Hq/Hkv `32/8`, head-size-128 sweep qualifies FP16/BF16,
+  block 16/32, and batches 1-128. All 44 context-16 cases are at least `1.42x`
+  and all 44 context-32 cases at least `1.15x` under CUDA Graph replay;
+  context 64 remains mixed;
+- the opt-in vLLM 0.24 route admits only that context-32-and-below envelope.
+  Against `FlashAttentionImpl.forward`, all 24 admitted cases win
+  (`1.151-2.368x`, median `1.489x`, CUDA Graph); all 12 context-64 cases execute
+  FA3 with a `1.001x` median graph ratio. Eager fallback retains about `3.7%`
+  Python wrapper overhead in this isolated method benchmark;
+- order-reversed one-layer stable-output synthetic Qwen2 engine gates match
+  every token, record zero Loom launches in baseline processes and 18 only in
+  Loom processes, and exercise actual FA3 scheduler metadata plus native
+  interleaved cache strides. End-to-end ratios remain process-order sensitive,
+  so this proves engine invocation but not model-level acceleration;
 
 See the [F32 report](results/h20-rms-norm-f32-smoke-20260721.json) and
 [low-precision report](results/h20-rms-norm-low-precision-20260721.json), plus
@@ -229,9 +244,17 @@ The [Min-P operator report](results/h20-min-p-filter-20260722.json) records the
 exact-mask gate, memory reduction, small-batch regression, and crossover point;
 the [65,536-token sweep](results/h20-min-p-filter-vocab65536-20260722.json)
 records the lower vocabulary boundary behind the vLLM routing threshold.
-The [paged decode-attention report](results/h20-paged-decode-attention-20260722.json)
-records randomized correctness and the explicit batch/context crossover
-against vLLM 0.24 FA3.
+The original
+[paged decode-attention report](results/h20-paged-decode-attention-20260722.json)
+records separate-cache bring-up. The
+[native-interleaved shape sweep](results/h20-paged-decode-interleaved-shape-sweep-20260722.json),
+[focused Qwen-shape batch sweep](results/h20-paged-decode-qwen-batch-sweep-20260722.json),
+and [vLLM backend report](results/h20-vllm-paged-decode-backend-20260722.json)
+define the routing boundary. The synthetic-Qwen
+[baseline-first](results/h20-vllm-paged-decode-engine-baseline-first-20260722.json)
+and [Loom-first](results/h20-vllm-paged-decode-engine-loom-first-20260722.json)
+reports prove isolated real-engine invocation and preserve the neutral
+end-to-end conclusion.
 
 ## Not Yet Proven
 
@@ -243,9 +266,8 @@ against vLLM 0.24 FA3.
 - Min-P real-model invocation and end-to-end serving benefit;
 - Loom-owned logits preprocessing, top-k/top-p, stochastic sampling, and
   general top-k logprob integration;
-- paged decode-attention vLLM routing, broader head/layout qualification,
-  real-model invocation, end-to-end benefit, and competitive 128-1,024-token
-  kernels;
+- paged decode-attention pretrained-model invocation, broader model geometry,
+  end-to-end benefit, and competitive 128-1,024-token kernels;
 - integration into SGLang or a Rust-native engine path;
 - larger production-model and serving-workload validation;
 - automated binary-wheel packaging;

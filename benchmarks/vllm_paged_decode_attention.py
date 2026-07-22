@@ -30,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kv-heads", type=int, default=8)
     parser.add_argument("--head-size", type=int, default=128)
     parser.add_argument("--block-size", type=int, default=16)
+    parser.add_argument(
+        "--cache-storage",
+        choices=("separate", "vllm-interleaved"),
+        default="separate",
+        help="physical storage backing the logical NHD K/V cache views",
+    )
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--iterations", type=int, default=500)
     parser.add_argument("--samples", type=int, default=7)
@@ -116,6 +122,7 @@ def benchmark_case(
     kv_heads: int,
     head_size: int,
     block_size: int,
+    cache_storage: str,
     warmup: int,
     iterations: int,
     samples: int,
@@ -129,12 +136,22 @@ def benchmark_case(
     query = torch.randn(
         (batch, query_heads, head_size), device="cuda", dtype=dtype
     )
-    key_cache = torch.randn(
-        (num_blocks, block_size, kv_heads, head_size),
-        device="cuda",
-        dtype=dtype,
-    )
-    value_cache = torch.randn_like(key_cache)
+    if cache_storage == "vllm-interleaved":
+        kv_cache = torch.randn(
+            (num_blocks, 2, block_size, kv_heads, head_size),
+            device="cuda",
+            dtype=dtype,
+        )
+        key_cache, value_cache = kv_cache.unbind(1)
+    elif cache_storage == "separate":
+        key_cache = torch.randn(
+            (num_blocks, block_size, kv_heads, head_size),
+            device="cuda",
+            dtype=dtype,
+        )
+        value_cache = torch.randn_like(key_cache)
+    else:
+        raise ValueError(f"unsupported cache storage: {cache_storage}")
     block_tables = torch.randperm(num_blocks, device="cuda", dtype=torch.int64)
     block_tables = block_tables.reshape(batch, max_blocks).to(torch.int32)
     # Keep the batch ragged while retaining one sequence at the named maximum.
@@ -245,6 +262,7 @@ def main() -> None:
             kv_heads=args.kv_heads,
             head_size=args.head_size,
             block_size=args.block_size,
+            cache_storage=args.cache_storage,
             warmup=args.warmup,
             iterations=args.iterations,
             samples=args.samples,
@@ -269,6 +287,19 @@ def main() -> None:
             "value_head_size": args.head_size,
             "block_size": args.block_size,
             "cache_layout": "NHD",
+            "cache_storage": args.cache_storage,
+            "key_block_stride": (
+                (2 if args.cache_storage == "vllm-interleaved" else 1)
+                * args.block_size
+                * args.kv_heads
+                * args.head_size
+            ),
+            "value_block_stride": (
+                (2 if args.cache_storage == "vllm-interleaved" else 1)
+                * args.block_size
+                * args.kv_heads
+                * args.head_size
+            ),
             "maximum_context": PAGED_DECODE_MAX_CONTEXT,
         },
         "timing": {

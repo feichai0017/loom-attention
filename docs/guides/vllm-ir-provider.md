@@ -36,6 +36,11 @@ and RNG, while Loom computes only the chosen token's raw logprob and rank from
 the preserved BF16/FP16 logits. Pinned top-k/top-p H20 runs show exact tokens
 and ranks plus an order-stable end-to-end improvement.
 
+A sixth opt-in replaces only a measured short-context slice of vLLM 0.24's
+FlashAttention decode method. Loom reads vLLM's interleaved native KV cache
+directly and routes every unsupported shape or semantic feature to the
+original FA3 method.
+
 The registered contract is:
 
 ```text
@@ -79,6 +84,7 @@ output, updated_residual = add_rms_norm_(
 
 from loom_kernels import (
     greedy_sample_logprobs,
+    paged_decode_attention_out,
     rope_paged_kv_write_,
     silu_and_mul,
     silu_and_mul_dynamic_fp8,
@@ -114,6 +120,16 @@ rope_paged_kv_write_(
     value_cache,
     slot_mapping,
     is_neox=True,
+)
+
+paged_decode_attention_out(
+    decode_query,
+    interleaved_kv_cache[:, 0],
+    interleaved_kv_cache[:, 1],
+    block_table_i32,
+    sequence_lengths_i32,
+    reusable_attention_output,
+    max_sequence_length=32,
 )
 ```
 
@@ -186,6 +202,22 @@ classes, and enables fusion only through 256 tokens by default. The threshold
 is intentional: the H20 advantage is largest for decode-sized batches and
 narrows as long prefill becomes compute-bound. The adapter targets vLLM 0.24's
 version-specific compiler contract and native F32/FP16/BF16 cache dtype.
+
+To enable the measured paged-decode route, opt in before vLLM constructs the
+engine:
+
+```bash
+LOOM_KERNELS_ENABLE_PAGED_DECODE_ATTENTION=1 python your_vllm_service.py
+```
+
+Embedding code can instead call
+`loom_kernels.vllm.register_vllm_paged_decode_attention()` explicitly. The
+fast path requires FP16/BF16 native KV, Hq/Hkv `32/8`, head size 128, block
+size 16 or 32, one causal decoder token per sequence, batch 1-128, and maximum
+context 1-32. Sliding windows, ALiBi, soft caps, sinks, cascade/common prefix,
+DCP, KV sharing, quantized cache, and multimodal prefix masks all execute the
+original `FlashAttentionImpl.forward`. FA3 AOT scheduler metadata is allowed
+because it affects only FA3's kernel scheduling, not attention semantics.
 
 To enable the pure-greedy sampled-logprob fast path, register it before engine
 construction:
@@ -296,6 +328,28 @@ PY
   --provider-order loom-first \
   --result-json /tmp/qwen25-rope-kv-loom-first.json
 
+.venv-vllm/bin/python benchmarks/vllm_paged_decode_shape_sweep.py \
+  --batches 1,8,32 --contexts 16,32,64,128 \
+  --cache-storage vllm-interleaved \
+  --output /tmp/paged-decode-shape-sweep.json
+
+.venv-vllm/bin/python benchmarks/vllm_paged_decode_backend.py \
+  --batches 1,8,32 --contexts 16,32,64 \
+  --dtypes bf16,f16 --block-sizes 16,32 \
+  --output /tmp/paged-decode-backend.json
+
+.venv-vllm/bin/python benchmarks/create_synthetic_qwen2.py \
+  --output build/synthetic-qwen2-h4096-l1-stable --layers 1 \
+  --hidden-size 4096 --intermediate-size 4096 \
+  --attention-heads 32 --kv-heads 8 --max-position-embeddings 64 \
+  --stable-token-zero
+
+.venv-vllm/bin/python benchmarks/vllm_engine_paged_decode.py \
+  --model build/synthetic-qwen2-h4096-l1-stable \
+  --case 1x16x16 --case 8x16x16 --case 32x16x16 \
+  --provider-order baseline-first \
+  --result-json /tmp/paged-decode-engine.json
+
 .venv-vllm/bin/python benchmarks/vllm_greedy_sample_logprobs.py \
   --rows 1,2,4,8,16,32,64,128 --vocab-size 151936 --dtype bf16 \
   --warmup 100 --iterations 1000 --repeats 7
@@ -380,6 +434,22 @@ integration plus operator-level benefit, not model-level acceleration. See the
 [large-token sweep](../results/h20-rope-paged-kv-large-20260722.json), and
 [engine report](../results/h20-vllm-qwen25-rope-paged-kv-engine-20260722.json).
 
+For paged decode, the native-interleaved
+[156-case shape sweep](../results/h20-paged-decode-interleaved-shape-sweep-20260722.json)
+has 82 FA3 wins and 74 losses. The focused
+[132-case batch sweep](../results/h20-paged-decode-qwen-batch-sweep-20260722.json)
+qualifies both low-precision dtypes and block sizes across batches 1-128:
+every context-16/32 case wins. The
+[backend report](../results/h20-vllm-paged-decode-backend-20260722.json)
+confirms all 24 routed cases at `1.15-2.37x` CUDA Graph speedup and graph-parity
+fallback for 12 context-64 cases. Order-reversed stable-output synthetic-Qwen
+[baseline-first](../results/h20-vllm-paged-decode-engine-baseline-first-20260722.json)
+and [Loom-first](../results/h20-vllm-paged-decode-engine-loom-first-20260722.json)
+runs match tokens and record zero/18 Loom submissions. Their latency ratios
+are process-order sensitive. The stable fixture preserves nonzero Q/K/V work
+but zeros the downstream projection and forces a robust token-zero winner, so
+the result proves integration rather than pretrained-model numerics or speedup.
+
 For greedy sampled logprobs, Loom matched vLLM's token IDs and tie-aware ranks
 exactly over a 151,936-token BF16 vocabulary; maximum sampled-logprob error was
 `9.54e-7`. The fused operator measured `3.16-4.35x` faster for 1-128 rows. Two
@@ -440,7 +510,8 @@ dispatcher bridge follows PyTorch's
   layer replacement (`SiluAndMul`), and one vLLM-version-specific
   activation-quant fusion-table replacement, plus a vLLM 0.24-specific
   RoPE+native-KV compiler-pass adapter, greedy/general selected-token
-  sampled-logprob sampler overrides, and a shape-gated Min-P override;
+  sampled-logprob sampler overrides, a shape-gated Min-P override, and a
+  measured-shape FlashAttention paged-decode override;
 - the activation-quant provider requires a graph-visible quantization boundary;
   it does not intercept vLLM's fused BF16-input FlashInfer/DeepGEMM path;
 - the isolated operator is faster on H20 and real-model invocation is proven,
@@ -449,4 +520,7 @@ dispatcher bridge follows PyTorch's
 - vLLM-owned penalties, masks, top-k/top-p, and stochastic sampling can feed
   the selected-token path, but Loom does not accelerate those stages yet;
   Min-P is the first separately qualified processor, while top-k logprob lists
-  and non-raw modes still fall back.
+  and non-raw modes still fall back;
+- paged decode is limited to the exact H20-qualified 32/8-head, D128,
+  context-at-most-32 envelope; pretrained-model and serving-scale evidence plus
+  competitive 128-1,024-token kernels remain open.

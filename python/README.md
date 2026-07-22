@@ -21,12 +21,17 @@ are not published yet.
 
 The base paged-decode API is available as
 `loom_kernels.paged_decode_attention` and `paged_decode_attention_out`. It
-accepts one contiguous `[B, Hq, D]` query, native NHD paged K/V caches, and
-contiguous int32 block tables/sequence lengths. The CUDA path supports
-F32/FP16/BF16 through 1,024 tokens and reuses K/V loads across GQA query-head
-groups. H20 evidence beats FA3 only through context 32 at batches 1/8 and
-context 64 at batch 32, so it is not registered as an automatic vLLM
-replacement.
+accepts one contiguous `[B, Hq, D]` query, dense-inner NHD paged K/V caches
+with an optional outer block stride, and contiguous int32 block
+tables/sequence lengths. This directly accepts the K/V views of vLLM's
+`[blocks, 2, block, Hkv, D]` storage. The CUDA path supports F32/FP16/BF16
+through 1,024 tokens and reuses K/V loads across GQA query-head groups.
+
+The vLLM 0.24 paged-decode replacement is opt-in with
+`LOOM_KERNELS_ENABLE_PAGED_DECODE_ATTENTION=1`. Its H20-qualified route is
+deliberately exact: FP16/BF16, Hq/Hkv `32/8`, head size 128, block size 16 or
+32, one query token per sequence, batch at most 128, and maximum context at
+most 32. Unsupported shapes and attention features run the original FA3 path.
 
 The vLLM 0.24 Min-P processor replacement is opt-in with
 `LOOM_KERNELS_ENABLE_MIN_P=1`. Its H20-qualified fast path requires at least 32

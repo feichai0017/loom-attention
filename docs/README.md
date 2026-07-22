@@ -42,8 +42,17 @@
 - [H20 min-p 65,536-vocabulary boundary report](results/h20-min-p-filter-vocab65536-20260722.json):
   direct evidence for the lower vocabulary gate at 32 and 128 rows.
 - [H20 paged decode-attention report](results/h20-paged-decode-attention-20260722.json):
-  randomized correctness plus the GQA-packed batch/context crossover against
-  vLLM 0.24 FlashAttention FA3.
+  separate-cache bring-up and the first GQA-packed batch/context crossover.
+- [H20 native-interleaved paged-decode shape sweep](results/h20-paged-decode-interleaved-shape-sweep-20260722.json):
+  13 dtype/head/block geometries and the shape-dependent FA3 crossover.
+- [H20 focused paged-decode batch sweep](results/h20-paged-decode-qwen-batch-sweep-20260722.json):
+  the FP16/BF16, block-16/32, batch-1-128 evidence behind the context-32 route.
+- [H20 vLLM paged-decode backend report](results/h20-vllm-paged-decode-backend-20260722.json):
+  direct `FlashAttentionImpl.forward` route/fallback correctness and latency.
+- [H20 vLLM paged-decode engine report, baseline first](results/h20-vllm-paged-decode-engine-baseline-first-20260722.json):
+  stable-output synthetic-Qwen exact tokens, path hits, and engine latency.
+- [H20 vLLM paged-decode engine report, Loom first](results/h20-vllm-paged-decode-engine-loom-first-20260722.json):
+  reverse-order path-hit and neutral end-to-end evidence.
 - [H20 top-k/top-p selected-logprob engine report, baseline first](results/h20-vllm-selected-logprobs-baseline-first-20260722.json):
   vLLM-owned sampling with exact tokens/ranks and end-to-end latency evidence.
 - [H20 top-k/top-p selected-logprob engine report, Loom first](results/h20-vllm-selected-logprobs-loom-first-20260722.json):
