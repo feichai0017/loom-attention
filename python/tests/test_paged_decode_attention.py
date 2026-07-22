@@ -121,6 +121,10 @@ CASES = [
     (16, 32, 8, 32, 24, 16, list(range(17, 33))),
     # Exercise the scalar Q/K fallback inside the packed GQA kernel.
     (2, 8, 2, 33, 17, 8, [17, 23]),
+    # Qwen2.5-style 7:1 GQA exercises the partial tail in the two-head path.
+    (2, 14, 2, 64, 64, 16, [17, 32]),
+    # Reach the partial four-head packed-grid threshold with the same tail.
+    (64, 14, 2, 64, 64, 16, list(range(17, 33)) * 4),
 ]
 
 

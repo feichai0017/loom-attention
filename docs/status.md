@@ -40,8 +40,9 @@
   and stable CPU oracle, F32/FP16/BF16 handwritten CUDA/C ABI, safe Rust
   entrypoints, dense-inner NHD cache indirection with explicit outer block
   strides, distinct K/V widths, a two/four-query-head GQA specialization that
-  reuses paged K/V loads, and a current-stream caller-allocated PyTorch
-  operator capped at 1,024 tokens;
+  reuses paged K/V loads, compile-time full/partial tail groups for odd GQA
+  ratios, D64 decode-Q register caching, and a current-stream caller-allocated
+  PyTorch operator capped at 1,024 tokens;
 - a C++ PyTorch dispatcher bridge using the current CUDA stream;
 - a source-adapter Python wheel with explicit framework extras, project
   metadata, license/readme payloads, and a CI install/entry-point smoke gate;
@@ -166,7 +167,7 @@
 - selected-token PyTorch tests cover arbitrary IDs/ranks, F32/FP16/BF16,
   Qwen's 151,936-token vocabulary, ties, padded rows, external streams,
   FakeTensor/schema validation, `torch.compile`, and CUDA Graph replay;
-- the current complete H20 Python suite passes 156 tests; the Rust core passes
+- the current complete H20 Python suite passes 162 tests; the Rust core passes
   30 contract/oracle tests, and the CUDA-feature workspace passes formatting,
   Clippy, release build, plus five safe-wrapper CPU-oracle tests;
 - against vLLM's exact `compute_logprobs + gather_logprobs(0)` path for the
@@ -186,12 +187,12 @@
   1, 8, 32, and 128 rows. The vLLM adapter therefore requires at least 32 rows
   and a 65,536-token vocabulary, falling back below either threshold. A second
   65,536-vocabulary sweep measured `1.35x` and `2.35x` at 32 and 128 rows;
-- paged-decode focused tests pass 25/25 across F32/FP16/BF16, MQA/GQA,
-  shuffled physical blocks, partial pages, odd head sizes, distinct value
-  widths, native vLLM-interleaved cache strides, external streams,
-  schema/FakeTensor, `torch.compile`, and launch telemetry; the combined
-  paged-decode/vLLM gate passes 47 tests and the safe Rust F32 wrapper matches
-  the CPU oracle on H20;
+- paged-decode focused tests pass 31/31 across F32/FP16/BF16, MQA/GQA,
+  odd GQA tail groups, shuffled physical blocks, partial pages, odd head sizes,
+  distinct value widths, native vLLM-interleaved cache strides, external
+  streams, schema/FakeTensor, `torch.compile`, and launch telemetry; the
+  paged-decode/vLLM gate passes 34 focused tests and the safe Rust F32 wrapper
+  matches the CPU oracle on H20;
 - a 156-case native-interleaved layout sweep spans 13 dtype/head/block shapes,
   three batches, and four contexts with maximum absolute error `0.015625`;
   only 82 cases beat FA3 and 74 lose, confirming shape-dependent routing;
@@ -201,9 +202,15 @@
   context 64 remains mixed;
 - the opt-in vLLM 0.24 route admits only that context-32-and-below envelope.
   Against `FlashAttentionImpl.forward`, all 24 admitted cases win
-  (`1.151-2.368x`, median `1.489x`, CUDA Graph); all 12 context-64 cases execute
+  (`1.154-2.374x`, median `1.478x`, CUDA Graph); all 12 context-64 cases execute
   FA3 with a `1.001x` median graph ratio. Eager fallback retains about `3.7%`
   Python wrapper overhead in this isolated method benchmark;
+- a 72-case odd-GQA `14/2`, D64 sweep passes at maximum absolute error
+  `0.015625`. All 36 context-16 cases win under CUDA Graph replay and 31/36
+  context-32 cases win; block-16 batches 24/32 remain below FA3;
+- an experimental pretrained Qwen2.5-0.5B route recorded `0/408` baseline/Loom
+  host submissions, but only two of five cases preserved every generated token
+  and Loom was about 3-5% slower end to end. The adapter change was rejected;
 - order-reversed one-layer stable-output synthetic Qwen2 engine gates match
   every token, record zero Loom launches in baseline processes and 18 only in
   Loom processes, and exercise actual FA3 scheduler metadata plus native
@@ -255,6 +262,11 @@ define the routing boundary. The synthetic-Qwen
 and [Loom-first](results/h20-vllm-paged-decode-engine-loom-first-20260722.json)
 reports prove isolated real-engine invocation and preserve the neutral
 end-to-end conclusion.
+The [odd-GQA operator sweep](results/h20-paged-decode-odd-gqa-20260722.json),
+[non-regression backend gate](results/h20-vllm-paged-decode-tail-gqa-backend-20260722.json),
+and [rejected pretrained-Qwen experiment](results/h20-vllm-qwen25-paged-decode-rejected-20260722.json)
+record the partial-tail extension, preservation of the existing route, and the
+reason `14/2`, D64 is not exposed through vLLM.
 
 ## Not Yet Proven
 
@@ -266,8 +278,9 @@ end-to-end conclusion.
 - Min-P real-model invocation and end-to-end serving benefit;
 - Loom-owned logits preprocessing, top-k/top-p, stochastic sampling, and
   general top-k logprob integration;
-- paged decode-attention pretrained-model invocation, broader model geometry,
-  end-to-end benefit, and competitive 128-1,024-token kernels;
+- a paged decode-attention pretrained-model route that passes token/quality and
+  end-to-end gates; the attempted Qwen2.5 `14/2`, D64 route was rejected;
+- competitive paged-decode kernels for the 128-1,024-token range;
 - integration into SGLang or a Rust-native engine path;
 - larger production-model and serving-workload validation;
 - automated binary-wheel packaging;

@@ -49,7 +49,7 @@ import { evidence, repositoryUrl } from "../data/site";
         rows and 1.89× at 128 rows, so its adapter routes smaller shapes back
         to vLLM instead of applying a blanket override. Native-interleaved
         paged decode is similarly shape-gated: all 24 routed Hq/Hkv 32/8,
-        D128, context-at-most-32 backend cases win at 1.15–2.37×, while the
+        D128, context-at-most-32 backend cases win at 1.154–2.374×, while the
         context-64 controls fall back to FA3 at graph parity. A broader
         156-case sweep still contains 74 losses, so this is not a blanket
         attention replacement.
@@ -153,6 +153,13 @@ python benchmarks/vllm_silu_and_mul_dynamic_fp8.py \
         stable token-zero LM head. End-to-end ratios remain process-order
         sensitive, so this proves the real engine and CUDA Graph path—not
         pretrained-model numerics or acceleration.
+      </p>
+      <p>
+        Odd GQA tails are now correct and separately compiled: a 72-case
+        Qwen2.5-style 14/2, D64 sweep passes, with 31/36 context-32 graph wins.
+        Its experimental pretrained-model route was still rejected: only two
+        of five cases preserved every token and end-to-end latency was 3–5%
+        worse. Loom keeps FA3 for that geometry.
       </p>
       <p>
         Machine-readable reports are versioned in{" "}

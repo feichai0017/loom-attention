@@ -56,11 +56,13 @@ execution, or lower dispatch overhead can create measurable engine value.
   decode batches falling back to vLLM;
 - paged MQA/GQA decode attention spans Rust contract/oracle, safe Rust/C ABI,
   handwritten F32/FP16/BF16 CUDA, and a current-stream PyTorch out API. Its
-  GQA path reuses paged K/V loads across two or four query heads and reads
-  vLLM's native interleaved K/V views without materialization. An opt-in vLLM
+  GQA path reuses paged K/V loads across two or four query heads, handles odd
+  final groups without slowing the full-group specialization, caches D64
+  decode Q pairs in registers, and reads vLLM's native interleaved K/V views
+  without materialization. An opt-in vLLM
   0.24 route admits only measured FP16/BF16 Hq/Hkv `32/8`, head-size 128,
   block-size 16/32, batch 1-128, context 1-32 decode shapes and otherwise calls
-  FA3. All 24 admitted backend cases win on H20 (`1.15-2.37x` CUDA Graph), while
+  FA3. All 24 admitted backend cases win on H20 (`1.154-2.374x` CUDA Graph), while
   a real synthetic-Qwen generate gate proves path hits and exact stable tokens;
 
 ## Workspace
@@ -342,6 +344,16 @@ gates record zero/18 process-local Loom submissions and exact stable tokens.
 The fixture masks nonzero Q/K/V work behind a zero downstream projection;
 its end-to-end ratios remain order-sensitive and cross parity. This closes
 engine invocation—not pretrained-model numerics or serving-level acceleration.
+
+The partial-tail
+[72-case odd-GQA sweep](docs/results/h20-paged-decode-odd-gqa-20260722.json)
+passes correctness for Qwen2.5-0.5B's `14/2`, D64 geometry and wins 31/36
+context-32 CUDA Graph cases. That is not enough for engine admission: the
+[pretrained-model experiment](docs/results/h20-vllm-qwen25-paged-decode-rejected-20260722.json)
+hit Loom 408 times but preserved all generated tokens in only two of five
+cases and was about 3-5% slower. The Qwen route was removed. The
+[non-regression backend gate](docs/results/h20-vllm-paged-decode-tail-gqa-backend-20260722.json)
+keeps the existing `32/8`, D128 route at 24/24 wins.
 
 For the Python build and engine configuration, see the
 [vLLM IR provider guide](docs/guides/vllm-ir-provider.md).

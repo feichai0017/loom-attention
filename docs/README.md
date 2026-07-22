@@ -53,6 +53,12 @@
   stable-output synthetic-Qwen exact tokens, path hits, and engine latency.
 - [H20 vLLM paged-decode engine report, Loom first](results/h20-vllm-paged-decode-engine-loom-first-20260722.json):
   reverse-order path-hit and neutral end-to-end evidence.
+- [H20 odd-GQA paged-decode sweep](results/h20-paged-decode-odd-gqa-20260722.json):
+  partial-tail correctness and Qwen2.5-style `14/2`, D64 crossover evidence.
+- [H20 paged-decode non-regression backend gate](results/h20-vllm-paged-decode-tail-gqa-backend-20260722.json):
+  24/24 wins for the existing `32/8`, D128 vLLM route after tail specialization.
+- [Rejected Qwen2.5 paged-decode experiment](results/h20-vllm-qwen25-paged-decode-rejected-20260722.json):
+  real path hits, token divergence, end-to-end regression, and the no-route decision.
 - [H20 top-k/top-p selected-logprob engine report, baseline first](results/h20-vllm-selected-logprobs-baseline-first-20260722.json):
   vLLM-owned sampling with exact tokens/ranks and end-to-end latency evidence.
 - [H20 top-k/top-p selected-logprob engine report, Loom first](results/h20-vllm-selected-logprobs-loom-first-20260722.json):

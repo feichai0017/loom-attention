@@ -20,6 +20,7 @@ constexpr uint32_t kPackedWarps = kPackedThreads / 32;
 constexpr uint32_t kMaxContext = 1024;
 constexpr uint32_t kSingleHeadMaximumContext = 16;
 constexpr uint64_t kFourHeadMinimumKvWorkItems = 128;
+constexpr uint64_t kPartialFourHeadMinimumPackedWorkItems = 256;
 
 struct FloatOps {
   using Scalar = float;
@@ -171,7 +172,11 @@ __global__ void paged_decode_attention_kernel(
   }
 }
 
-template <typename Ops, int PackedQueryHeads>
+// Keep the established full-group kernel branch-free. Odd GQA ratios compile
+// a separate guarded tail, while D64 compiles fixed per-lane Q pairs into
+// registers instead of reloading the decode query for every cache position.
+template <typename Ops, int PackedQueryHeads, bool CacheHeadSize64Query,
+          bool AllowPartialGroup>
 __global__ void paged_decode_attention_gqa_kernel(
     const typename Ops::Scalar* query, const typename Ops::Scalar* key_cache,
     const typename Ops::Scalar* value_cache, const int32_t* block_tables,
@@ -181,8 +186,13 @@ __global__ void paged_decode_attention_gqa_kernel(
     uint64_t key_block_stride, uint64_t value_block_stride,
     uint32_t max_blocks_per_sequence, uint32_t max_sequence_length,
     float scale) {
+  constexpr uint32_t packed_query_heads =
+      static_cast<uint32_t>(PackedQueryHeads);
   const uint32_t queries_per_kv = query_heads / kv_heads;
-  const uint32_t packed_groups_per_kv = queries_per_kv / PackedQueryHeads;
+  const uint32_t packed_groups_per_kv =
+      AllowPartialGroup
+          ? (queries_per_kv + packed_query_heads - 1U) / packed_query_heads
+          : queries_per_kv / packed_query_heads;
   const uint32_t packed_groups_per_sequence =
       kv_heads * packed_groups_per_kv;
   const uint32_t sequence = blockIdx.x / packed_groups_per_sequence;
@@ -190,7 +200,12 @@ __global__ void paged_decode_attention_gqa_kernel(
   const uint32_t kv_head = packed_group / packed_groups_per_kv;
   const uint32_t subgroup = packed_group % packed_groups_per_kv;
   const uint32_t first_query_head =
-      kv_head * queries_per_kv + subgroup * PackedQueryHeads;
+      kv_head * queries_per_kv + subgroup * packed_query_heads;
+  const uint32_t remaining_query_heads =
+      queries_per_kv - subgroup * packed_query_heads;
+  const uint32_t active_query_heads =
+      remaining_query_heads < packed_query_heads ? remaining_query_heads
+                                                 : packed_query_heads;
   const uint32_t sequence_length =
       static_cast<uint32_t>(sequence_lengths[sequence]);
 
@@ -221,6 +236,23 @@ __global__ void paged_decode_attention_gqa_kernel(
 
   const uint32_t lane = threadIdx.x & 31U;
   const uint32_t warp = threadIdx.x >> 5U;
+  float2 cached_query_values[PackedQueryHeads] = {};
+  if constexpr (CacheHeadSize64Query) {
+#pragma unroll
+    for (int packed_head = 0; packed_head < PackedQueryHeads;
+         ++packed_head) {
+      if (!AllowPartialGroup ||
+          static_cast<uint32_t>(packed_head) < active_query_heads) {
+        const uint32_t query_head =
+            first_query_head + static_cast<uint32_t>(packed_head);
+        const size_t query_offset =
+            (static_cast<size_t>(sequence) * query_heads + query_head) *
+            head_size;
+        cached_query_values[packed_head] =
+            Ops::load_pair(query + query_offset + lane * 2U);
+      }
+    }
+  }
   for (uint32_t position = warp; position < sequence_length;
        position += kPackedWarps) {
     float partials[PackedQueryHeads] = {};
@@ -228,7 +260,23 @@ __global__ void paged_decode_attention_gqa_kernel(
     const size_t key_offset =
         static_cast<size_t>(physical_blocks[position]) * key_block_stride +
         (static_cast<size_t>(block_offset) * kv_heads + kv_head) * head_size;
-    if (head_size % 2U == 0U) {
+    if constexpr (CacheHeadSize64Query) {
+      const float2 key_values =
+          Ops::load_pair(key_cache + key_offset + lane * 2U);
+#pragma unroll
+      for (int packed_head = 0; packed_head < PackedQueryHeads;
+           ++packed_head) {
+        if (!AllowPartialGroup ||
+            static_cast<uint32_t>(packed_head) < active_query_heads) {
+          partials[packed_head] =
+              fmaf(cached_query_values[packed_head].x, key_values.x,
+                   partials[packed_head]);
+          partials[packed_head] =
+              fmaf(cached_query_values[packed_head].y, key_values.y,
+                   partials[packed_head]);
+        }
+      }
+    } else if (head_size % 2U == 0U) {
       for (uint32_t dimension = lane * 2U; dimension < head_size;
            dimension += 64U) {
         const float2 key_values =
@@ -236,16 +284,20 @@ __global__ void paged_decode_attention_gqa_kernel(
 #pragma unroll
         for (int packed_head = 0; packed_head < PackedQueryHeads;
              ++packed_head) {
-          const uint32_t query_head = first_query_head + packed_head;
-          const size_t query_offset =
-              (static_cast<size_t>(sequence) * query_heads + query_head) *
-              head_size;
-          const float2 query_values =
-              Ops::load_pair(query + query_offset + dimension);
-          partials[packed_head] =
-              fmaf(query_values.x, key_values.x, partials[packed_head]);
-          partials[packed_head] =
-              fmaf(query_values.y, key_values.y, partials[packed_head]);
+          if (!AllowPartialGroup ||
+              static_cast<uint32_t>(packed_head) < active_query_heads) {
+            const uint32_t query_head =
+                first_query_head + static_cast<uint32_t>(packed_head);
+            const size_t query_offset =
+                (static_cast<size_t>(sequence) * query_heads + query_head) *
+                head_size;
+            const float2 query_values =
+                Ops::load_pair(query + query_offset + dimension);
+            partials[packed_head] =
+                fmaf(query_values.x, key_values.x, partials[packed_head]);
+            partials[packed_head] =
+                fmaf(query_values.y, key_values.y, partials[packed_head]);
+          }
         }
       }
     } else {
@@ -256,21 +308,28 @@ __global__ void paged_decode_attention_gqa_kernel(
 #pragma unroll
         for (int packed_head = 0; packed_head < PackedQueryHeads;
              ++packed_head) {
-          const uint32_t query_head = first_query_head + packed_head;
-          const size_t query_offset =
-              (static_cast<size_t>(sequence) * query_heads + query_head) *
-              head_size;
-          partials[packed_head] +=
-              Ops::to_float(query[query_offset + dimension]) * key_value;
+          if (!AllowPartialGroup ||
+              static_cast<uint32_t>(packed_head) < active_query_heads) {
+            const uint32_t query_head =
+                first_query_head + static_cast<uint32_t>(packed_head);
+            const size_t query_offset =
+                (static_cast<size_t>(sequence) * query_heads + query_head) *
+                head_size;
+            partials[packed_head] +=
+                Ops::to_float(query[query_offset + dimension]) * key_value;
+          }
         }
       }
     }
 #pragma unroll
     for (int packed_head = 0; packed_head < PackedQueryHeads; ++packed_head) {
-      partials[packed_head] = warp_sum(partials[packed_head]);
-      if (lane == 0U) {
-        scores[static_cast<size_t>(packed_head) * max_sequence_length +
-               position] = partials[packed_head] * scale;
+      if (!AllowPartialGroup ||
+          static_cast<uint32_t>(packed_head) < active_query_heads) {
+        partials[packed_head] = warp_sum(partials[packed_head]);
+        if (lane == 0U) {
+          scores[static_cast<size_t>(packed_head) * max_sequence_length +
+                 position] = partials[packed_head] * scale;
+        }
       }
     }
   }
@@ -278,34 +337,37 @@ __global__ void paged_decode_attention_gqa_kernel(
 
 #pragma unroll
   for (int packed_head = 0; packed_head < PackedQueryHeads; ++packed_head) {
-    float local_maximum = -CUDART_INF_F;
-    float* head_scores =
-        scores + static_cast<size_t>(packed_head) * max_sequence_length;
-    for (uint32_t position = threadIdx.x; position < sequence_length;
-         position += kPackedThreads) {
-      local_maximum = fmaxf(local_maximum, head_scores[position]);
-    }
-    const float reduced_maximum =
-        BlockReduce(reduction_storage).Reduce(local_maximum, Maximum{});
-    if (threadIdx.x == 0U) {
-      maximum = reduced_maximum;
-    }
-    __syncthreads();
+    if (!AllowPartialGroup ||
+        static_cast<uint32_t>(packed_head) < active_query_heads) {
+      float local_maximum = -CUDART_INF_F;
+      float* head_scores =
+          scores + static_cast<size_t>(packed_head) * max_sequence_length;
+      for (uint32_t position = threadIdx.x; position < sequence_length;
+           position += kPackedThreads) {
+        local_maximum = fmaxf(local_maximum, head_scores[position]);
+      }
+      const float reduced_maximum =
+          BlockReduce(reduction_storage).Reduce(local_maximum, Maximum{});
+      if (threadIdx.x == 0U) {
+        maximum = reduced_maximum;
+      }
+      __syncthreads();
 
-    float local_denominator = 0.0F;
-    for (uint32_t position = threadIdx.x; position < sequence_length;
-         position += kPackedThreads) {
-      const float weight = expf(head_scores[position] - maximum);
-      head_scores[position] = weight;
-      local_denominator += weight;
+      float local_denominator = 0.0F;
+      for (uint32_t position = threadIdx.x; position < sequence_length;
+           position += kPackedThreads) {
+        const float weight = expf(head_scores[position] - maximum);
+        head_scores[position] = weight;
+        local_denominator += weight;
+      }
+      __syncthreads();
+      const float denominator =
+          BlockReduce(reduction_storage).Sum(local_denominator);
+      if (threadIdx.x == 0U) {
+        inverse_denominators[packed_head] = 1.0F / denominator;
+      }
+      __syncthreads();
     }
-    __syncthreads();
-    const float denominator =
-        BlockReduce(reduction_storage).Sum(local_denominator);
-    if (threadIdx.x == 0U) {
-      inverse_denominators[packed_head] = 1.0F / denominator;
-    }
-    __syncthreads();
   }
 
   for (uint32_t dimension = threadIdx.x; dimension < value_head_size;
@@ -322,21 +384,80 @@ __global__ void paged_decode_attention_gqa_kernel(
 #pragma unroll
       for (int packed_head = 0; packed_head < PackedQueryHeads;
            ++packed_head) {
-        accumulators[packed_head] +=
-            scores[static_cast<size_t>(packed_head) * max_sequence_length +
-                   position] *
-            value;
+        if (!AllowPartialGroup ||
+            static_cast<uint32_t>(packed_head) < active_query_heads) {
+          accumulators[packed_head] +=
+              scores[static_cast<size_t>(packed_head) * max_sequence_length +
+                     position] *
+              value;
+        }
       }
     }
 #pragma unroll
     for (int packed_head = 0; packed_head < PackedQueryHeads; ++packed_head) {
-      const uint32_t query_head = first_query_head + packed_head;
-      const size_t output_offset =
-          (static_cast<size_t>(sequence) * query_heads + query_head) *
-          value_head_size;
-      output[output_offset + dimension] = Ops::from_float(
-          accumulators[packed_head] * inverse_denominators[packed_head]);
+      if (!AllowPartialGroup ||
+          static_cast<uint32_t>(packed_head) < active_query_heads) {
+        const uint32_t query_head =
+            first_query_head + static_cast<uint32_t>(packed_head);
+        const size_t output_offset =
+            (static_cast<size_t>(sequence) * query_heads + query_head) *
+            value_head_size;
+        output[output_offset + dimension] = Ops::from_float(
+            accumulators[packed_head] * inverse_denominators[packed_head]);
+      }
     }
+  }
+}
+
+template <typename Ops, int PackedQueryHeads>
+void launch_paged_decode_attention_gqa(
+    const typename Ops::Scalar* query, const typename Ops::Scalar* key_cache,
+    const typename Ops::Scalar* value_cache, const int32_t* block_tables,
+    const int32_t* sequence_lengths, typename Ops::Scalar* output,
+    uint32_t query_heads, uint32_t kv_heads, uint32_t head_size,
+    uint32_t value_head_size, uint32_t block_size,
+    uint64_t key_block_stride, uint64_t value_block_stride,
+    uint32_t max_blocks_per_sequence, uint32_t max_sequence_length,
+    float scale, uint64_t packed_grid_size, size_t shared_bytes,
+    cudaStream_t stream) {
+  const bool allow_partial_group =
+      (query_heads / kv_heads) % static_cast<uint32_t>(PackedQueryHeads) != 0U;
+  if (head_size == 64U && allow_partial_group) {
+    paged_decode_attention_gqa_kernel<Ops, PackedQueryHeads, true, true>
+        <<<static_cast<uint32_t>(packed_grid_size), kPackedThreads,
+           shared_bytes,
+           stream>>>(query, key_cache, value_cache, block_tables,
+                     sequence_lengths, output, query_heads, kv_heads,
+                     head_size, value_head_size, block_size, key_block_stride,
+                     value_block_stride, max_blocks_per_sequence,
+                     max_sequence_length, scale);
+  } else if (head_size == 64U) {
+    paged_decode_attention_gqa_kernel<Ops, PackedQueryHeads, true, false>
+        <<<static_cast<uint32_t>(packed_grid_size), kPackedThreads,
+           shared_bytes,
+           stream>>>(query, key_cache, value_cache, block_tables,
+                     sequence_lengths, output, query_heads, kv_heads,
+                     head_size, value_head_size, block_size, key_block_stride,
+                     value_block_stride, max_blocks_per_sequence,
+                     max_sequence_length, scale);
+  } else if (allow_partial_group) {
+    paged_decode_attention_gqa_kernel<Ops, PackedQueryHeads, false, true>
+        <<<static_cast<uint32_t>(packed_grid_size), kPackedThreads,
+           shared_bytes,
+           stream>>>(query, key_cache, value_cache, block_tables,
+                     sequence_lengths, output, query_heads, kv_heads,
+                     head_size, value_head_size, block_size, key_block_stride,
+                     value_block_stride, max_blocks_per_sequence,
+                     max_sequence_length, scale);
+  } else {
+    paged_decode_attention_gqa_kernel<Ops, PackedQueryHeads, false, false>
+        <<<static_cast<uint32_t>(packed_grid_size), kPackedThreads,
+           shared_bytes,
+           stream>>>(query, key_cache, value_cache, block_tables,
+                     sequence_lengths, output, query_heads, kv_heads,
+                     head_size, value_head_size, block_size, key_block_stride,
+                     value_block_stride, max_blocks_per_sequence,
+                     max_sequence_length, scale);
   }
 }
 
@@ -418,14 +539,24 @@ int launch_paged_decode_attention(
   const uint32_t queries_per_kv = query_heads / kv_heads;
   const uint64_t kv_work_items =
       static_cast<uint64_t>(sequences) * kv_heads;
+  constexpr uint32_t four_packed_query_heads = 4;
+  const uint64_t four_head_packed_grid_size =
+      kv_work_items *
+      ((queries_per_kv + four_packed_query_heads - 1U) /
+       four_packed_query_heads);
   // Packing four query heads cuts the grid by 4x. Keep enough independent
-  // (sequence, KV-head) work on the H20-qualified path to preserve occupancy.
+  // work on the H20-qualified path to preserve occupancy. Existing evenly
+  // packed GQA shapes retain their original threshold; a partial tail group
+  // uses its actual packed grid size because it adds another CUDA block.
   if (max_sequence_length > kSingleHeadMaximumContext &&
-      queries_per_kv % 4U == 0U &&
-      kv_work_items >= kFourHeadMinimumKvWorkItems) {
-    constexpr uint32_t packed_query_heads = 4;
-    const uint64_t packed_grid_size =
-        kv_work_items * (queries_per_kv / packed_query_heads);
+      queries_per_kv >= four_packed_query_heads &&
+      ((queries_per_kv % four_packed_query_heads == 0U &&
+       kv_work_items >= kFourHeadMinimumKvWorkItems) ||
+       (queries_per_kv % four_packed_query_heads != 0U &&
+        four_head_packed_grid_size >=
+            kPartialFourHeadMinimumPackedWorkItems))) {
+    constexpr uint32_t packed_query_heads = four_packed_query_heads;
+    const uint64_t packed_grid_size = four_head_packed_grid_size;
     const size_t score_bytes =
         static_cast<size_t>(packed_query_heads) * max_sequence_length *
         sizeof(float);
@@ -434,19 +565,18 @@ int launch_paged_decode_attention(
     const size_t shared_bytes =
         block_id_start +
         static_cast<size_t>(max_sequence_length) * sizeof(uint32_t);
-    paged_decode_attention_gqa_kernel<Ops, packed_query_heads>
-        <<<static_cast<uint32_t>(packed_grid_size), kPackedThreads,
-           shared_bytes,
-           cuda_stream>>>(
-            query, key_cache, value_cache, block_tables, sequence_lengths,
-            output, query_heads, kv_heads, head_size, value_head_size,
-            block_size, key_block_stride, value_block_stride,
-            max_blocks_per_sequence, max_sequence_length, scale);
+    launch_paged_decode_attention_gqa<Ops, packed_query_heads>(
+        query, key_cache, value_cache, block_tables, sequence_lengths, output,
+        query_heads, kv_heads, head_size, value_head_size, block_size,
+        key_block_stride, value_block_stride, max_blocks_per_sequence,
+        max_sequence_length, scale, packed_grid_size, shared_bytes,
+        cuda_stream);
   } else if (max_sequence_length > kSingleHeadMaximumContext &&
-             queries_per_kv % 2U == 0U) {
+             queries_per_kv >= 2U) {
     constexpr uint32_t packed_query_heads = 2;
     const uint64_t packed_grid_size =
-        kv_work_items * (queries_per_kv / packed_query_heads);
+        kv_work_items *
+        ((queries_per_kv + packed_query_heads - 1U) / packed_query_heads);
     const size_t score_bytes =
         static_cast<size_t>(packed_query_heads) * max_sequence_length *
         sizeof(float);
@@ -455,14 +585,12 @@ int launch_paged_decode_attention(
     const size_t shared_bytes =
         block_id_start +
         static_cast<size_t>(max_sequence_length) * sizeof(uint32_t);
-    paged_decode_attention_gqa_kernel<Ops, packed_query_heads>
-        <<<static_cast<uint32_t>(packed_grid_size), kPackedThreads,
-           shared_bytes,
-           cuda_stream>>>(
-            query, key_cache, value_cache, block_tables, sequence_lengths,
-            output, query_heads, kv_heads, head_size, value_head_size,
-            block_size, key_block_stride, value_block_stride,
-            max_blocks_per_sequence, max_sequence_length, scale);
+    launch_paged_decode_attention_gqa<Ops, packed_query_heads>(
+        query, key_cache, value_cache, block_tables, sequence_lengths, output,
+        query_heads, kv_heads, head_size, value_head_size, block_size,
+        key_block_stride, value_block_stride, max_blocks_per_sequence,
+        max_sequence_length, scale, packed_grid_size, shared_bytes,
+        cuda_stream);
   } else {
     const size_t shared_bytes =
         static_cast<size_t>(max_sequence_length) * sizeof(float);

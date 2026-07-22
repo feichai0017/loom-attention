@@ -99,15 +99,18 @@ Status: in progress.
   safe Rust, current-stream PyTorch, randomized oracle, compile/graph gates,
   and an H20 FA3 comparison are complete;
 - ~~GQA-packed 32/64-token optimization~~ — two/four query heads reuse each
-  paged K/V load;
+  paged K/V load; compile-time partial tails support odd GQA ratios without
+  adding hot-loop guards to full groups;
 - ~~native vLLM cache layout and broad short-context qualification~~ — the C
   ABI accepts interleaved K/V block strides; a 156-case shape sweep and focused
   132-case batch sweep identify the exact winning envelope;
 - ~~measured-shape vLLM 0.24 adapter with explicit FA3 fallback~~ — the opt-in
   route is limited to FP16/BF16 Hq/Hkv 32/8, D128, block 16/32, batch <=128,
   context <=32; direct backend and stable-output synthetic-engine gates pass;
-- pretrained-model gate, broader head geometry, and tiled or split-K/LSE
-  optimization for the measured 128-1024-token gap;
+- pretrained-model gate and broader head geometry — the first Qwen2.5 `14/2`,
+  D64 attempt hit the engine but failed exact-token and latency gates, so it
+  remains intentionally unrouted;
+- tiled or split-K/LSE optimization for the measured 128-1024-token gap;
 - vendor attention integration where it wins;
 - split-KV/LSE merge, sliding-window variants, and MLA when a consumer exists.
 

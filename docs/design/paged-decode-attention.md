@@ -61,11 +61,18 @@ and threads accumulate independent value dimensions.
 For GQA contexts above 16 tokens, a packed specialization assigns one block to
 two query heads that share a KV head. It resolves each paged token once, uses
 pair loads for Q/K where alignment permits, computes both softmax rows, and
-loads each V element once for both output heads. When the grid contains at
-least 128 `(sequence, kv_head)` work items and the GQA ratio is divisible by
-four, the H20-qualified dispatch packs four query heads instead. Small grids
-keep two-head packing to retain enough independent thread blocks. The dynamic
-score and token-offset buffers deliberately cap both paths at 1,024 tokens.
+loads each V element once for both output heads. A final partial group is
+guarded explicitly, so odd GQA ratios such as Qwen2.5-0.5B's `14/2` geometry
+do not fall back to one block per query head. Full and partial groups are
+separate compile-time specializations: the established even-ratio path keeps
+an unguarded hot loop. Head-size 64 also caches each lane's fixed decode Q pair
+in registers instead of reloading it for every context position.
+
+When the grid contains at least 128 `(sequence, kv_head)` work items and the
+GQA ratio is divisible by four, the H20-qualified dispatch packs four query
+heads instead. A partial four-head tail requires at least 256 resulting packed
+blocks; smaller grids keep two-head packing to retain parallelism. The dynamic
+score and token-offset buffers deliberately cap all paths at 1,024 tokens.
 
 The C ABI carries independent K/V block strides and accepts contiguous int32
 block tables and sequence lengths, matching vLLM's live metadata. Their active
@@ -106,18 +113,29 @@ integration, not a new global attention backend.
 
 Steps 1-6 are complete for the narrow route above. Randomized
 PyTorch tests cover MQA/GQA, partial final blocks, shuffled physical blocks,
-odd head sizes, distinct value widths, F32/FP16/BF16, external streams,
-FakeTensor/schema, `torch.compile`, CUDA Graph replay, vLLM-interleaved cache
-strides, and launch telemetry. On NVIDIA H20 all 25 focused paged-decode tests,
-47 combined paged-decode/vLLM tests, and the 156-test Python suite pass.
+odd GQA tail groups, odd head sizes, distinct value widths, F32/FP16/BF16,
+external streams, FakeTensor/schema, `torch.compile`, CUDA Graph replay,
+vLLM-interleaved cache strides, and launch telemetry. On NVIDIA H20 all 31
+focused paged-decode tests, the 34-test paged-decode/vLLM gate, and the
+162-test Python suite pass.
 
 The native-interleaved 156-case shape sweep establishes why the route is
 narrow: 82 cases beat FA3 and 74 lose. A focused 132-case Hq/Hkv `32/8`
 qualification covers FP16/BF16, block 16/32, and batches 1-128. Every
 context-16 case reaches at least `1.42x` and every context-32 case at least
 `1.15x`; context 64 is mixed. Through the real vLLM method boundary, all 24
-admitted cases win (`1.15-2.37x`, median `1.49x`, CUDA Graph), while all 12
+admitted cases win (`1.154-2.374x`, median `1.478x`, CUDA Graph), while all 12
 context-64 cases fall back with a `1.001x` median graph ratio.
+
+The odd-GQA H20 sweep is deliberately not a new engine route. Across 72
+`14/2`, D64 cases, correctness passes with maximum absolute error `0.015625`.
+All 36 context-16 cases beat FA3 under CUDA Graph replay; 31 of 36 context-32
+cases win, with block-16 batches 24/32 forming the main regression pocket.
+An experimental Qwen2.5-0.5B route reached the real engine (`0` baseline and
+`408` Loom host submissions), but exact generated tokens matched in only two
+of five cases and Loom batch latency was about 3-5% higher. The route was
+therefore rejected and is absent from the adapter. This separates a useful
+general CUDA improvement from an unqualified production integration.
 
 A one-layer stable-output synthetic Qwen2 gate proves actual `LLM.generate`,
 FA3 metadata, native interleaved cache, compilation, and CUDA Graph path hits:
@@ -126,6 +144,7 @@ and generated tokens match. The fixture keeps nonzero Q/K/V projections but
 zeros the attention/MLP output projections and makes token zero a stable LM
 head winner; it is intentionally a path gate, not pretrained-model numerical
 evidence. Order-reversed end-to-end ratios are not stable enough for a
-model-level claim. Step 7 therefore remains open for a pretrained model and
-serving workload. The next kernel work broadens model geometries and adds a
-tiled or split-K/LSE path for 128-1,024 tokens.
+model-level claim. The rejected Qwen2.5 experiment supplies pretrained-model
+evidence, but not an admissible route. Step 7 remains open for a geometry whose
+token/quality gate and end-to-end serving measurement both pass. The next
+kernel work adds a tiled or split-K/LSE path for 128-1,024 tokens.

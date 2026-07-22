@@ -137,7 +137,7 @@ export const evidence = [
   {
     operator: "Paged MQA/GQA decode",
     shape: "FP16/BF16 · Hq/Hkv 32/8 · context ≤ 32",
-    result: "1.15–2.37×",
+    result: "1.154–2.374×",
     detail: "24/24 routed vLLM backend cases win; other shapes fall back to FA3",
   },
 ];

@@ -441,7 +441,7 @@ has 82 FA3 wins and 74 losses. The focused
 qualifies both low-precision dtypes and block sizes across batches 1-128:
 every context-16/32 case wins. The
 [backend report](../results/h20-vllm-paged-decode-backend-20260722.json)
-confirms all 24 routed cases at `1.15-2.37x` CUDA Graph speedup and graph-parity
+confirms all 24 routed cases at `1.154-2.374x` CUDA Graph speedup and graph-parity
 fallback for 12 context-64 cases. Order-reversed stable-output synthetic-Qwen
 [baseline-first](../results/h20-vllm-paged-decode-engine-baseline-first-20260722.json)
 and [Loom-first](../results/h20-vllm-paged-decode-engine-loom-first-20260722.json)
@@ -449,6 +449,13 @@ runs match tokens and record zero/18 Loom submissions. Their latency ratios
 are process-order sensitive. The stable fixture preserves nonzero Q/K/V work
 but zeros the downstream projection and forces a robust token-zero winner, so
 the result proves integration rather than pretrained-model numerics or speedup.
+The later [odd-GQA sweep](../results/h20-paged-decode-odd-gqa-20260722.json)
+passes 72 Qwen2.5-style `14/2`, D64 cases, but the
+[pretrained-model experiment](../results/h20-vllm-qwen25-paged-decode-rejected-20260722.json)
+matched every generated token in only two of five cases and was 3-5% slower.
+That profile is intentionally absent from the adapter; the
+[non-regression gate](../results/h20-vllm-paged-decode-tail-gqa-backend-20260722.json)
+keeps the existing `32/8`, D128 route at 24/24 wins.
 
 For greedy sampled logprobs, Loom matched vLLM's token IDs and tie-aware ranks
 exactly over a 151,936-token BF16 vocabulary; maximum sampled-logprob error was

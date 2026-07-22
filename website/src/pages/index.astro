@@ -55,7 +55,7 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 
   <section class="metrics-strip" aria-label="Project status">
     <div class="metric"><strong>10</strong><span>qualified operator paths</span></div>
-    <div class="metric"><strong>156/156</strong><span>H20 Python tests passing</span></div>
+    <div class="metric"><strong>162/162</strong><span>H20 Python tests passing</span></div>
     <div class="metric"><strong>SM90</strong><span>NVIDIA H20 evidence</span></div>
     <div class="metric"><strong>v0.24</strong><span>vLLM integration target</span></div>
   </section>
@@ -152,8 +152,9 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, "");
       order-stable real-engine latency and TPOT wins. FP8 and RoPE+KV prove
       exact invocation but remain near parity. Min-P is shape-gated from its
       measured crossover. Paged decode now has a native-cache, context-32 vLLM
-      route and synthetic-engine path proof, while pretrained-model and
-      serving-scale concurrency, memory, and goodput stay separate gates.
+      route and synthetic-engine path proof. A broader Qwen2.5 geometry reached
+      the real engine but failed token and latency gates, so it remains
+      unrouted; serving-scale concurrency, memory, and goodput stay separate.
     </p>
   </section>
 

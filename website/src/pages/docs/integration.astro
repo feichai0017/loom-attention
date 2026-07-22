@@ -101,8 +101,9 @@ engine = LLM(
         size 16/32, one-token causal decode, batch at most 128, and context at
         most 32. Every other shape or semantic feature executes the original
         FA3 method. All 24 routed H20 backend cases win; a synthetic-Qwen
-        engine gate proves path hits and exact stable tokens, while a
-        pretrained-model performance gate remains open.
+        engine gate proves path hits and exact stable tokens. An experimental
+        Qwen2.5 14/2-head route reached the engine but failed token and latency
+        gates, so it was removed rather than broadening this contract.
       </p>
 
       <h2>Graph-visible boundary</h2>
