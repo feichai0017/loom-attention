@@ -367,6 +367,7 @@ def run_case(
     collector: RejectionCollector,
     launch_count_fn: Callable[[], int],
     tokenizer: Any | None,
+    boundary_profile_repeats: int,
 ) -> dict[str, Any]:
     import torch
 
@@ -421,7 +422,7 @@ def run_case(
         engine,
         sampling,
         prompts,
-        args.boundary_profile_repeats,
+        boundary_profile_repeats,
         collector,
         args.spec_tokens,
         token_ids,
@@ -612,6 +613,11 @@ def run_provider(args: argparse.Namespace) -> dict[str, Any]:
         )
     engine = LLM(**engine_arguments)
     launches_after_engine_init = launch_count_fn()
+    effective_profile_repeats = (
+        0
+        if provider == "target-only"
+        else args.boundary_profile_repeats
+    )
     cases = [
         run_case(
             engine,
@@ -621,6 +627,7 @@ def run_provider(args: argparse.Namespace) -> dict[str, Any]:
             collector,
             launch_count_fn,
             tokenizer,
+            effective_profile_repeats,
         )
         for case in args.cases
     ]
@@ -665,7 +672,7 @@ def run_provider(args: argparse.Namespace) -> dict[str, Any]:
         "dtype": "bfloat16",
         "warmup": args.warmup,
         "repeats": args.repeats,
-        "boundary_profile_repeats": args.boundary_profile_repeats,
+        "boundary_profile_repeats": effective_profile_repeats,
         "seed": args.seed,
         "enforce_eager": args.enforce_eager,
         "max_model_len": max_model_len,
