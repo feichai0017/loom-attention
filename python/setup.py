@@ -5,6 +5,7 @@ from pathlib import Path
 
 from setuptools import setup
 from setuptools.command.bdist_wheel import bdist_wheel
+from setuptools.dist import Distribution
 
 
 PACKAGE_ROOT = Path(__file__).parent / "src" / "loom_kernels"
@@ -15,10 +16,14 @@ NATIVE_PAYLOAD = (
 )
 
 
+class LoomBinaryDistribution(Distribution):
+    def has_ext_modules(self) -> bool:
+        return True
+
+
 class LoomNativeWheel(bdist_wheel):
     def finalize_options(self) -> None:
         super().finalize_options()
-        self.root_is_pure = False
         build_number = os.environ.get("LOOM_KERNELS_WHEEL_BUILD")
         if build_number:
             self.build_number = build_number
@@ -38,4 +43,7 @@ class LoomNativeWheel(bdist_wheel):
         super().run()
 
 
-setup(cmdclass={"bdist_wheel": LoomNativeWheel})
+setup(
+    cmdclass={"bdist_wheel": LoomNativeWheel},
+    distclass=LoomBinaryDistribution,
+)

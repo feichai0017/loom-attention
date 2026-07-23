@@ -303,10 +303,11 @@ def inspect_wheel(
 
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
-        shared_libraries = sorted(
-            Path(name).name for name in names if name.endswith(".so")
+        shared_libraries = sorted(name for name in names if name.endswith(".so"))
+        expected_libraries = sorted(
+            f"loom_kernels/lib/{library}" for library in LIBRARIES
         )
-        if shared_libraries != sorted(LIBRARIES):
+        if shared_libraries != expected_libraries:
             raise RuntimeError(
                 f"wheel must contain exactly the two Loom .so files: "
                 f"{shared_libraries}"
@@ -324,12 +325,10 @@ def inspect_wheel(
         if expected_tag not in wheel_metadata:
             raise RuntimeError(f"wheel metadata is missing {expected_tag!r}")
 
-        manifest_paths = [
-            name for name in names if name.endswith("loom_kernels/lib/native.json")
-        ]
-        if len(manifest_paths) != 1:
-            raise RuntimeError("wheel has no unique native build manifest")
-        actual_manifest = json.loads(archive.read(manifest_paths[0]))
+        manifest_path = "loom_kernels/lib/native.json"
+        if names.count(manifest_path) != 1:
+            raise RuntimeError("wheel has no native build manifest at package root")
+        actual_manifest = json.loads(archive.read(manifest_path))
         if actual_manifest != expected_manifest:
             raise RuntimeError("wheel native manifest does not match the build")
 
