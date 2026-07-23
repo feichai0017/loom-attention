@@ -8,8 +8,12 @@ The controller launches three independent providers:
   verification boundary registered before engine construction.
 
 Every provider receives identical prompt token IDs, generation settings, and
-cache isolation. Correctness and path evidence are acceptance gates; a
-performance improvement is reported, never assumed.
+cache isolation. Exact native-vLLM versus Loom speculative output, acceptance,
+and path evidence are gates. Target-only remains a performance baseline:
+speculative verification changes target-model execution shapes, so a
+floating-point argmax tie can make its greedy trajectory diverge even when the
+two speculative providers remain exactly equivalent. Performance improvement
+is reported, never assumed.
 """
 
 from __future__ import annotations
@@ -794,11 +798,23 @@ def median_profile_metric(
     return None if metric is None else float(metric["median"])
 
 
+def mismatched_request_count(
+    left: list[list[int]],
+    right: list[list[int]],
+) -> int:
+    return sum(
+        left_tokens != right_tokens
+        for left_tokens, right_tokens in zip(left, right, strict=True)
+    )
+
+
 def compare_reports(
     reports: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], bool, bool, bool]:
+) -> tuple[list[dict[str, Any]], bool, bool, bool, bool, bool]:
     comparisons: list[dict[str, Any]] = []
-    all_tokens_match = True
+    native_and_loom_tokens_match = True
+    target_and_native_tokens_match = True
+    target_and_loom_tokens_match = True
     all_prompt_ids_match = True
     speculative_stats_match = True
     provider_cases = [
@@ -816,10 +832,15 @@ def compare_reports(
         target_vs_native = target["token_ids"] == native["token_ids"]
         target_vs_loom = target["token_ids"] == loom["token_ids"]
         native_vs_loom = native["token_ids"] == loom["token_ids"]
-        case_tokens_match = (
-            target_vs_native and target_vs_loom and native_vs_loom
+        native_and_loom_tokens_match = (
+            native_and_loom_tokens_match and native_vs_loom
         )
-        all_tokens_match = all_tokens_match and case_tokens_match
+        target_and_native_tokens_match = (
+            target_and_native_tokens_match and target_vs_native
+        )
+        target_and_loom_tokens_match = (
+            target_and_loom_tokens_match and target_vs_loom
+        )
 
         native_stats = native["speculative_stats"]
         loom_stats = loom["speculative_stats"]
@@ -879,9 +900,27 @@ def compare_reports(
                     "prompt_token_ids_sha256"
                 ],
                 "token_ids": {
-                    "target_vs_native_match": target_vs_native,
-                    "target_vs_loom_match": target_vs_loom,
-                    "native_vs_loom_match": native_vs_loom,
+                    "target_vs_native": {
+                        "match": target_vs_native,
+                        "mismatched_requests": mismatched_request_count(
+                            target["token_ids"],
+                            native["token_ids"],
+                        ),
+                    },
+                    "target_vs_loom": {
+                        "match": target_vs_loom,
+                        "mismatched_requests": mismatched_request_count(
+                            target["token_ids"],
+                            loom["token_ids"],
+                        ),
+                    },
+                    "native_vs_loom": {
+                        "match": native_vs_loom,
+                        "mismatched_requests": mismatched_request_count(
+                            native["token_ids"],
+                            loom["token_ids"],
+                        ),
+                    },
                 },
                 "speculative_stats_match": case_stats_match,
                 "target_over_native_batch_latency": ratio(
@@ -937,7 +976,9 @@ def compare_reports(
         )
     return (
         comparisons,
-        all_tokens_match,
+        native_and_loom_tokens_match,
+        target_and_native_tokens_match,
+        target_and_loom_tokens_match,
         all_prompt_ids_match,
         speculative_stats_match,
     )
@@ -974,7 +1015,9 @@ def run_controller(args: argparse.Namespace) -> dict[str, Any]:
 
     (
         comparisons,
-        tokens_match,
+        native_and_loom_tokens_match,
+        target_and_native_tokens_match,
+        target_and_loom_tokens_match,
         prompt_ids_match,
         speculative_stats_match,
     ) = compare_reports(reports)
@@ -1025,7 +1068,7 @@ def run_controller(args: argparse.Namespace) -> dict[str, Any]:
     )
     accepted = all(
         (
-            tokens_match,
+            native_and_loom_tokens_match,
             prompt_ids_match,
             speculative_stats_match,
             target_has_no_speculative_calls,
@@ -1039,7 +1082,7 @@ def run_controller(args: argparse.Namespace) -> dict[str, Any]:
         )
     )
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "benchmark": "vllm_real_model_speculative_decode",
         "tested_revision": args.tested_revision,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -1053,7 +1096,16 @@ def run_controller(args: argparse.Namespace) -> dict[str, Any]:
         "provider_order": order,
         "acceptance": {
             "passed": accepted,
-            "token_ids_match_across_all_providers": tokens_match,
+            "native_and_loom_token_ids_match": (
+                native_and_loom_tokens_match
+            ),
+            "target_baseline_matches_native": (
+                target_and_native_tokens_match
+            ),
+            "target_baseline_matches_loom": (
+                target_and_loom_tokens_match
+            ),
+            "target_baseline_match_is_acceptance_gate": False,
             "prompt_token_ids_match_across_all_providers": (
                 prompt_ids_match
             ),
