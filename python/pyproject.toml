@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=80", "wheel>=0.45"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "loom-kernels"
 version = "1.0.0a1"
-description = "PyTorch and vLLM adapters for the Loom Kernels CUDA backend"
+description = "Rust/CUDA inference operators with PyTorch and vLLM adapters"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -17,6 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+dependencies = ["torch>=2.10,<2.12"]
 
 [project.urls]
 Documentation = "https://feichai0017.github.io/loom-kernels/"
@@ -24,7 +25,6 @@ Issues = "https://github.com/feichai0017/loom-kernels/issues"
 Repository = "https://github.com/feichai0017/loom-kernels"
 
 [project.optional-dependencies]
-torch = ["torch>=2.4"]
 vllm = ["vllm>=0.24,<0.26"]
 test = ["pytest>=8"]
 
@@ -33,6 +33,9 @@ loom_kernels = "loom_kernels.vllm:register_vllm_ir"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+loom_kernels = ["lib/*.so", "lib/native.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

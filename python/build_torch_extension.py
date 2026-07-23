@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 import shutil
@@ -11,15 +12,32 @@ import sys
 from torch.utils.cpp_extension import library_paths, load
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--cuda-home",
+        type=Path,
+        default=Path(os.environ.get("CUDA_HOME", "/usr/local/cuda")),
+    )
+    parser.add_argument(
+        "--build-dir",
+        type=Path,
+        help="directory containing libloom_cuda_bridge.so and receiving the dispatcher",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     interpreter_bin = str(Path(sys.executable).parent)
     os.environ["PATH"] = interpreter_bin + os.pathsep + os.environ.get("PATH", "")
     repository = Path(__file__).resolve().parents[1]
-    cuda_home = Path(os.environ.get("CUDA_HOME", "/usr/local/cuda"))
+    cuda_home = args.cuda_home.resolve()
     cuda_include = cuda_home / "include"
     if not cuda_include.is_dir():
         raise FileNotFoundError(f"CUDA headers not found below {cuda_home}")
-    build_root = repository / "build"
+    build_root = (args.build_dir or repository / "build").resolve()
+    build_root.mkdir(parents=True, exist_ok=True)
     rust_bridge = build_root / "libloom_cuda_bridge.so"
     if not rust_bridge.is_file():
         raise FileNotFoundError(

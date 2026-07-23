@@ -2,16 +2,90 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
+import hashlib
+import re
 import threading
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 import torch
+
+from ._native_build import native_build_info
 
 
 BRIDGE_ABI_VERSION = 1
 _LOCK = threading.Lock()
 _LOADED_PATH: Path | None = None
+
+
+def _version_pair(value: str) -> tuple[int, int]:
+    match = re.match(r"^(\d+)\.(\d+)", value)
+    if match is None:
+        raise RuntimeError(f"cannot parse version pair from {value!r}")
+    return int(match.group(1)), int(match.group(2))
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_native_runtime(
+    manifest: Mapping[str, Any],
+    extension_path: Path,
+) -> None:
+    if manifest.get("schema_version") != 1:
+        raise RuntimeError("unsupported Loom native manifest schema")
+    build = manifest.get("build")
+    runtime = manifest.get("runtime")
+    if not isinstance(build, Mapping) or not isinstance(runtime, Mapping):
+        raise RuntimeError("Loom native manifest is missing build/runtime sections")
+    if build.get("bridge_abi_version") != BRIDGE_ABI_VERSION:
+        raise RuntimeError(
+            "Loom native manifest and Python bridge ABI versions do not match"
+        )
+
+    current_torch = _version_pair(torch.__version__)
+    torch_runtime = runtime.get("torch")
+    if not isinstance(torch_runtime, Mapping):
+        raise RuntimeError("Loom native manifest has no PyTorch runtime range")
+    if build.get("torch_stable_abi_target") != torch_runtime.get("minimum"):
+        raise RuntimeError(
+            "Loom native manifest's Stable ABI target and runtime floor differ"
+        )
+    minimum_torch = _version_pair(str(torch_runtime.get("minimum")))
+    maximum_torch = _version_pair(str(torch_runtime.get("maximum_exclusive")))
+    if not minimum_torch <= current_torch < maximum_torch:
+        raise RuntimeError(
+            "Loom's installed native wheel requires PyTorch "
+            f">={minimum_torch[0]}.{minimum_torch[1]},"
+            f"<{maximum_torch[0]}.{maximum_torch[1]}; "
+            f"found {torch.__version__}"
+        )
+
+    libraries = manifest.get("libraries")
+    if not isinstance(libraries, Mapping):
+        raise RuntimeError("Loom native manifest has no library audit")
+    expected_hashes = libraries.get("sha256")
+    if not isinstance(expected_hashes, Mapping):
+        raise RuntimeError("Loom native manifest has no library hashes")
+    for library in (
+        extension_path.parent / "libloom_cuda_bridge.so",
+        extension_path,
+    ):
+        expected = expected_hashes.get(library.name)
+        if (
+            not library.is_file()
+            or not isinstance(expected, str)
+            or _sha256(library) != expected
+        ):
+            raise RuntimeError(
+                f"Loom native library hash mismatch for {library.name}"
+            )
 
 
 def _repository_root() -> Path | None:
@@ -24,17 +98,15 @@ def _repository_root() -> Path | None:
 
 
 def _candidates() -> tuple[Path, ...]:
-    candidates: list[Path] = []
-    configured = os.environ.get("LOOM_KERNELS_TORCH_LIBRARY")
-    if configured:
-        candidates.append(Path(configured).expanduser())
-    candidates.append(
+    installed = (
         Path(__file__).resolve().parent / "lib" / "libloom_kernels_torch.so"
     )
+    if native_build_info() is not None:
+        return (installed,)
     repository = _repository_root()
     if repository is not None:
-        candidates.append(repository / "build" / "libloom_kernels_torch.so")
-    return tuple(candidates)
+        return (repository / "build" / "libloom_kernels_torch.so",)
+    return (installed,)
 
 
 def torch_extension_path() -> Path | None:
@@ -62,9 +134,13 @@ def load_torch_extension() -> Path:
         raise RuntimeError(
             "Loom Kernels requires its compiled PyTorch extension; no Python "
             "or ctypes fallback exists. Run `python python/build_native.py` "
-            "and `python python/build_torch_extension.py`, or set "
-            f"LOOM_KERNELS_TORCH_LIBRARY. Searched:\n{searched}"
+            "and `python python/build_torch_extension.py` from a source "
+            f"checkout, or reinstall the native wheel. Searched:\n{searched}"
         )
+
+    manifest = native_build_info()
+    if manifest is not None:
+        _validate_native_runtime(manifest, path)
 
     with _LOCK:
         if _LOADED_PATH is None:

@@ -7,6 +7,13 @@ from typing import Any
 __version__ = "1.0.0a1"
 
 
+def native_build_info() -> dict[str, Any] | None:
+    """Return the installed native-wheel matrix manifest."""
+    from ._native_build import native_build_info as implementation
+
+    return implementation()
+
+
 def add_rms_norm_(*args: Any, **kwargs: Any) -> Any:
     """Lazily import and execute the PyTorch Add+RMSNorm adapter."""
     from .torch_ops import add_rms_norm_ as implementation
@@ -117,6 +124,7 @@ __all__ = [
     "add_rms_norm_",
     "greedy_sample_logprobs",
     "min_p_filter_",
+    "native_build_info",
     "paged_decode_attention",
     "paged_decode_attention_out",
     "rms_norm",
