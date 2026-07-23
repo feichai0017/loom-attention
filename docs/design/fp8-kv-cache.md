@@ -23,9 +23,8 @@ engine's native FP8 bytes instead of adding a second public cache operator.
 | --- | --- | --- |
 | query | `[tokens, query_heads, head_size]` | F32, FP16, or BF16 |
 | key | `[tokens, kv_heads, head_size]` | same as query |
-| value | `[tokens, kv_heads, value_head_size]` | same as query |
-| key cache | `[blocks, block_size, kv_heads, head_size]` | source dtype or uint8 FP8 storage |
-| value cache | `[blocks, block_size, kv_heads, value_head_size]` | source dtype or uint8 FP8 storage |
+| value | `[tokens, kv_heads, head_size]` | same as query |
+| packed K/V cache | `[blocks, 2, block_size, kv_heads, head_size]` | source dtype or uint8 FP8 storage |
 | K/V scales | `[1]` or `[kv_heads]` | contiguous F32 on the same CUDA device |
 | positions and slots | `[tokens]` and `[cache_tokens]` | contiguous int64 |
 
@@ -49,9 +48,13 @@ finite, and the consuming attention backend reconstructs values with the
 corresponding multiplicative scale. Negative slots skip the cache write while
 Q/K still receive RoPE. Non-negative slots must be unique and in range.
 
-Packed QKV token strides and NHD/HND cache strides remain explicit. Loom
-borrows every allocation and PyTorch's current stream; it performs no copies,
-hidden allocation, host synchronization, or cache ownership.
+Packed QKV token strides and NHD/HND cache strides remain explicit. The
+framework boundary takes the engine's single packed K/V allocation instead of
+two mutable views into the same storage. That keeps auto-functionalization
+correct on PyTorch 2.10/2.11 while the checked Rust bridge still receives
+explicit borrowed K/V pointers and strides. Loom borrows every allocation and
+PyTorch's current stream; it performs no copies, hidden allocation, host
+synchronization, or cache ownership.
 
 The CPU oracle validates scale values directly. The borrowed CUDA bridge
 validates their dtype, device, storage length, and aliasing, but treats positive

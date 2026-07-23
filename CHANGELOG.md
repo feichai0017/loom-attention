@@ -31,6 +31,10 @@ spelling; Python package metadata uses the equivalent PEP 440 spelling.
   `rope_paged_kv_write_` schema to carry an explicit cache encoding and K/V
   scale tensors; the checked bridge ABI is now version 2 and native wheels use
   a distinct `2cu...` build tag.
+- replaced separate mutable K/V cache-view arguments in the PyTorch
+  `rope_paged_kv_write_` schema with the engine's single packed
+  `[blocks, 2, block, heads, head_size]` allocation; no legacy overload is
+  retained.
 
 ### Added
 
@@ -67,6 +71,9 @@ spelling; Python package metadata uses the equivalent PEP 440 spelling.
   directory;
 - constrained the wheel build backend to setuptools 80–81 to match PyTorch
   2.11's build dependency range.
+- made fused RoPE+KV auto-functionalization preserve the complete packed cache
+  on PyTorch 2.10 by exposing one real mutable cache allocation instead of two
+  storage-aliasing views.
 
 ## 1.0.0-alpha.1 — 2026-07-22
 

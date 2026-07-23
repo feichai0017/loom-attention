@@ -149,6 +149,9 @@ def test_silu_and_mul_dynamic_fp8_checked_can_be_captured_and_replayed():
 def test_vllm_compatible_schema_supports_scale_layout_and_upper_bound(
     is_scale_transposed,
 ):
+    pytest.importorskip("vllm")
+    import vllm._custom_ops  # noqa: F401 - registers vLLM dispatcher ops
+
     input_tensor = torch.randn(4, 512, device="cuda", dtype=torch.bfloat16)
     output = torch.empty(4, 256, device="cuda", dtype=torch.float8_e4m3fn)
     expected_output = torch.empty_like(output)

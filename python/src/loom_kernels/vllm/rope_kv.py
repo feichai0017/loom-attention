@@ -76,7 +76,6 @@ def register_vllm_rope_paged_kv() -> str | None:
     ) -> None:
         global _ROPE_PAGED_KV_FIRST_CONTRACT
         del attention
-        key_cache, value_cache = kv_cache.unbind(1)
         if _ROPE_PAGED_KV_FIRST_CONTRACT is None:
             _ROPE_PAGED_KV_FIRST_CONTRACT = {
                 "query": {
@@ -121,8 +120,7 @@ def register_vllm_rope_paged_kv() -> str | None:
             value,
             positions,
             cos_sin_cache,
-            key_cache,
-            value_cache,
+            kv_cache,
             layer._k_scale,
             layer._v_scale,
             layer_slot_mapping,

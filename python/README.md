@@ -148,8 +148,7 @@ rope_paged_kv_write_(
     value,
     positions_i64,
     cos_sin_cache,
-    key_cache,
-    value_cache,
+    packed_kv_cache,
     cache_scales,
     cache_scales,
     slot_mapping_i64,
@@ -177,11 +176,14 @@ dense-inner NHD paged K/V views, and contiguous int32 block tables and sequence
 lengths. It directly accepts K/V views from vLLM's
 `[blocks, 2, block, Hkv, D]` storage.
 
-`rope_paged_kv_write_` accepts F32/FP16/BF16 sources and either matching native
-cache tensors or `torch.uint8` FP8 E4M3 storage. K/V scales are contiguous
-CUDA F32 tensors with one element or one element per KV head. Dynamic
-per-token-head scales, E5M2, INT8, and NVFP4 are not silently coerced into this
-contract.
+`rope_paged_kv_write_` accepts F32/FP16/BF16 sources and one packed
+`[blocks, 2, block, Hkv, D]` cache allocation with either the matching source
+dtype or `torch.uint8` FP8 E4M3 storage. The single mutable cache tensor is the
+real vLLM allocation and remains functionalization-safe across PyTorch
+2.10/2.11; separate K/V mutable-view arguments are not supported. K/V scales
+are contiguous CUDA F32 tensors with one element or one element per KV head.
+Dynamic per-token-head scales, E5M2, INT8, and NVFP4 are not silently coerced
+into this contract.
 
 ## vLLM opt-ins
 

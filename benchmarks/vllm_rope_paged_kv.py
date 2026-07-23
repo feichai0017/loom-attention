@@ -167,7 +167,7 @@ def benchmark_case(
     )
     loom_query = query_source.clone()
     loom_key = key_source.clone()
-    loom_combined, loom_key_cache, loom_value_cache = make_cache(
+    loom_combined, _, _ = make_cache(
         num_blocks, block_size, kv_heads, head_size, cache_torch_dtype, layout
     )
 
@@ -198,8 +198,7 @@ def benchmark_case(
             value,
             positions,
             cos_sin_cache,
-            loom_key_cache,
-            loom_value_cache,
+            loom_combined,
             key_scales,
             value_scales,
             slots,

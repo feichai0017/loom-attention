@@ -97,7 +97,7 @@ def test_rope_paged_kv_matches_vllm(dtype, is_neox, layout):
     )
     actual_query = query.clone()
     actual_key = key.clone()
-    actual_combined, actual_key_cache, actual_value_cache = make_cache(
+    actual_combined, _, _ = make_cache(
         num_blocks, block_size, kv_heads, head_size, dtype, layout
     )
 
@@ -127,8 +127,7 @@ def test_rope_paged_kv_matches_vllm(dtype, is_neox, layout):
         value,
         positions,
         cos_sin_cache,
-        actual_key_cache,
-        actual_value_cache,
+        actual_combined,
         scale,
         scale,
         slots,
@@ -140,7 +139,7 @@ def test_rope_paged_kv_matches_vllm(dtype, is_neox, layout):
         actual is expected
         for actual, expected in zip(
             returned,
-            (actual_query, actual_key, actual_key_cache, actual_value_cache),
+            (actual_query, actual_key, actual_combined),
             strict=True,
         )
     )
@@ -199,7 +198,7 @@ def test_rope_paged_kv_fp8_matches_vllm(dtype, scale_mode, layout, is_neox):
     )
     actual_query = query.clone()
     actual_key = key.clone()
-    actual_combined, actual_key_cache, actual_value_cache = make_cache(
+    actual_combined, _, _ = make_cache(
         num_blocks, block_size, kv_heads, head_size, torch.uint8, layout
     )
 
@@ -230,8 +229,7 @@ def test_rope_paged_kv_fp8_matches_vllm(dtype, scale_mode, layout, is_neox):
             value,
             positions,
             cos_sin_cache,
-            actual_key_cache,
-            actual_value_cache,
+            actual_combined,
             key_scales,
             value_scales,
             slots,
@@ -261,7 +259,7 @@ def make_small_fp8_case():
     positions = torch.tensor([1, 2], device="cuda", dtype=torch.int64)
     slots = torch.tensor([0, 5], device="cuda", dtype=torch.int64)
     cos_sin_cache = make_cos_sin_cache(8, head_size, torch.bfloat16)
-    combined, key_cache, value_cache = make_cache(
+    combined, _, _ = make_cache(
         1, 8, kv_heads, head_size, torch.uint8, "NHD"
     )
     key_scales = torch.tensor([0.25], device="cuda", dtype=torch.float32)
@@ -272,8 +270,7 @@ def make_small_fp8_case():
         value,
         positions,
         cos_sin_cache,
-        key_cache,
-        value_cache,
+        combined,
         key_scales,
         value_scales,
         slots,
@@ -306,13 +303,30 @@ def test_rope_paged_kv_fp8_launch_counter_proves_bridge_submission():
 def test_rope_paged_kv_rejects_bad_scale_length_before_bridge_launch():
     arguments, _ = make_small_fp8_case()
     invalid_scales = torch.ones(2, device="cuda", dtype=torch.float32)
-    arguments = (*arguments[:7], invalid_scales, invalid_scales, *arguments[9:])
+    arguments = (*arguments[:6], invalid_scales, invalid_scales, *arguments[8:])
 
     reset_launch_count(Operator.ROPE_PAGED_KV_WRITE)
     with pytest.raises(
         RuntimeError,
         match="one element or one element per KV head",
     ):
+        rope_paged_kv_write_(*arguments)
+    assert launch_count(Operator.ROPE_PAGED_KV_WRITE) == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_rope_paged_kv_rejects_overlapping_packed_cache_partitions():
+    arguments, _ = make_small_fp8_case()
+    storage = torch.empty(128, device="cuda", dtype=torch.uint8)
+    overlapping_cache = torch.as_strided(
+        storage,
+        (1, 2, 8, 1, 8),
+        (128, 1, 8, 8, 1),
+    )
+    arguments = (*arguments[:5], overlapping_cache, *arguments[6:])
+
+    reset_launch_count(Operator.ROPE_PAGED_KV_WRITE)
+    with pytest.raises(RuntimeError, match="partitions must not overlap"):
         rope_paged_kv_write_(*arguments)
     assert launch_count(Operator.ROPE_PAGED_KV_WRITE) == 0
 
@@ -332,8 +346,7 @@ def test_rope_paged_kv_fp8_survives_torch_compile():
         value,
         positions,
         cos_sin_cache,
-        key_cache,
-        value_cache,
+        kv_cache,
         key_scales,
         value_scales,
         slots,
@@ -345,17 +358,16 @@ def test_rope_paged_kv_fp8_survives_torch_compile():
             value,
             positions,
             cos_sin_cache,
-            key_cache,
-            value_cache,
+            kv_cache,
             key_scales,
             value_scales,
             slots,
             is_neox,
         )
-        return query, key, key_cache, value_cache
+        return query, key, kv_cache
 
     compiled = torch.compile(compiled_target, fullgraph=True)
-    actual_query, actual_key, _, _ = compiled(*actual_arguments)
+    actual_query, actual_key, _ = compiled(*actual_arguments)
     torch.cuda.synchronize()
 
     torch.testing.assert_close(actual_query, expected_arguments[0])
@@ -429,7 +441,7 @@ def test_rope_paged_kv_accepts_packed_qkv_and_short_slot_mapping(cache_dtype):
     expected_combined, expected_key_cache, expected_value_cache = make_cache(
         2, 8, kv_heads, head_size, cache_torch_dtype, "NHD"
     )
-    actual_combined, actual_key_cache, actual_value_cache = make_cache(
+    actual_combined, _, _ = make_cache(
         2, 8, kv_heads, head_size, cache_torch_dtype, "NHD"
     )
     torch.ops._C.rotary_embedding(
@@ -458,8 +470,7 @@ def test_rope_paged_kv_accepts_packed_qkv_and_short_slot_mapping(cache_dtype):
         actual_value,
         positions,
         cos_sin_cache,
-        actual_key_cache,
-        actual_value_cache,
+        actual_combined,
         scale,
         scale,
         slots,
@@ -487,7 +498,7 @@ def test_rope_paged_kv_uses_the_current_external_stream():
     positions = torch.tensor([1, 2], device="cuda", dtype=torch.int64)
     slots = torch.tensor([0, 5], device="cuda", dtype=torch.int64)
     cos_sin_cache = make_cos_sin_cache(8, head_size, torch.float16)
-    _, key_cache, value_cache = make_cache(
+    kv_cache, key_cache, value_cache = make_cache(
         1, 8, kv_heads, head_size, torch.float16, "NHD"
     )
     scale = torch.ones((), device="cuda", dtype=torch.float32)
@@ -500,8 +511,7 @@ def test_rope_paged_kv_uses_the_current_external_stream():
             value,
             positions,
             cos_sin_cache,
-            key_cache,
-            value_cache,
+            kv_cache,
             scale,
             scale,
             slots,
