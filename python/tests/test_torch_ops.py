@@ -43,6 +43,15 @@ def vllm_dynamic_fp8_reference(
     return output, scales
 
 
+def test_public_mutating_api_rejects_requires_grad_tensors():
+    input_tensor = torch.randn(2, 8, requires_grad=True)
+    residual = torch.randn_like(input_tensor)
+    weight = torch.ones(8)
+
+    with pytest.raises(ValueError, match="inference-only"):
+        add_rms_norm_(input_tensor, residual, weight, 1.0e-5)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("shape", [(8, 4096), (3, 127)])

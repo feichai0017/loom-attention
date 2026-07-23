@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from .._torch_dispatch import _silu_and_mul, _silu_and_mul_dynamic_fp8
-from ._common import _DTYPE_NAMES
+from ._common import _DTYPE_NAMES, _require_inference_tensors
 
 
 def supports_silu_and_mul(input_tensor: torch.Tensor) -> bool:
@@ -76,6 +76,7 @@ def silu_and_mul_out(
     output: torch.Tensor,
 ) -> torch.Tensor:
     """Write split-half `silu(gate) * up` into a caller-owned tensor."""
+    _require_inference_tensors(input_tensor, output)
     _silu_and_mul(input_tensor, output)
     return output
 
@@ -98,6 +99,7 @@ def silu_and_mul_dynamic_fp8_out(
     group_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Write fused SwiGLU and dynamic block-FP8 into caller buffers."""
+    _require_inference_tensors(input_tensor, output, scales)
     _silu_and_mul_dynamic_fp8(input_tensor, output, scales, int(group_size))
     return output, scales
 

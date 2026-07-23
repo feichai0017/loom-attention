@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from .._torch_dispatch import _paged_decode_attention
-from ._common import _DTYPE_NAMES
+from ._common import _DTYPE_NAMES, _require_inference_tensors
 
 
 PAGED_DECODE_MAX_CONTEXT = 1024
@@ -108,6 +108,7 @@ def paged_decode_attention_out(
     scale: float | None = None,
 ) -> torch.Tensor:
     """Execute base paged decode attention into caller-owned output storage."""
+    _require_inference_tensors(query, key_cache, value_cache, output)
     if scale is None:
         scale = query.shape[-1] ** -0.5
     _paged_decode_attention(

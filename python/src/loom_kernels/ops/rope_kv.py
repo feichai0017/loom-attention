@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from .._torch_dispatch import _rope_paged_kv_write
-from ._common import _DTYPE_NAMES
+from ._common import _DTYPE_NAMES, _require_inference_tensors
 
 
 def supports_rope_paged_kv_write(
@@ -94,6 +94,14 @@ def rope_paged_kv_write_(
     is_neox: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Rotate Q/K in place and scatter rotated K plus V into paged caches."""
+    _require_inference_tensors(
+        query,
+        key,
+        value,
+        cos_sin_cache,
+        key_cache,
+        value_cache,
+    )
     _rope_paged_kv_write(
         query,
         key,

@@ -11,7 +11,7 @@ from .._torch_dispatch import (
     _rms_norm,
     _rms_norm_dynamic_fp8,
 )
-from ._common import _DTYPE_NAMES
+from ._common import _DTYPE_NAMES, _require_inference_tensors
 
 
 def supports_rms_norm(
@@ -138,6 +138,7 @@ def add_rms_norm_(
     epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Update input/residual in place and return those same tensor objects."""
+    _require_inference_tensors(input_tensor, residual, weight)
     _add_rms_norm_mut(input_tensor, residual, weight, float(epsilon))
     return input_tensor, residual
 
@@ -149,6 +150,7 @@ def rms_norm_out(
     epsilon: float,
 ) -> torch.Tensor:
     """Write RMSNorm into caller-owned output storage."""
+    _require_inference_tensors(input_tensor, weight, output)
     _rms_norm(input_tensor, weight, output, float(epsilon))
     return output
 
@@ -172,6 +174,7 @@ def rms_norm_dynamic_fp8_out(
     epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Write fused RMSNorm and per-token FP8 results into caller-owned buffers."""
+    _require_inference_tensors(input_tensor, weight, output, scales)
     _rms_norm_dynamic_fp8(input_tensor, weight, output, scales, float(epsilon))
     return output, scales
 

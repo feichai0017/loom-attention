@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the C++ PyTorch dispatcher shim without recompiling CUDA kernels."""
+"""Build the LibTorch Stable ABI dispatcher without recompiling CUDA kernels."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 import sys
 
-from torch.utils.cpp_extension import load
+from torch.utils.cpp_extension import library_paths, load
 
 
 def main() -> None:
@@ -35,10 +35,13 @@ def main() -> None:
             str(repository / "crates" / "loom-cuda-bridge" / "include"),
             str(cuda_include),
         ],
-        extra_cflags=["-O3", "-std=c++17"],
+        extra_cflags=["-O3", "-std=c++17", "-DUSE_CUDA"],
         extra_ldflags=[
             f"-L{build_root}",
             "-lloom_cuda_bridge",
+            f"-L{library_paths()[0]}",
+            "-Wl,--as-needed",
+            "-ltorch_cuda",
             "-Wl,-rpath,'$$ORIGIN'",
             "-Wl,-rpath,'$$ORIGIN/..'",
         ],
