@@ -111,6 +111,25 @@ pub enum ContractError {
         token_id: i64,
         vocab_size: usize,
     },
+    TargetTokenIdOutOfI32Range {
+        token: usize,
+        token_id: i64,
+    },
+    DraftTokenCapacityExceeded {
+        draft_tokens: usize,
+        capacity: usize,
+    },
+    InvalidCumulativeDraftLength {
+        request: usize,
+        previous: i32,
+        current: i32,
+        draft_tokens: usize,
+        max_draft_tokens: usize,
+    },
+    FinalCumulativeDraftLengthMismatch {
+        expected: usize,
+        actual: i32,
+    },
     InvalidProbability {
         parameter: &'static str,
         row: usize,
@@ -200,6 +219,31 @@ impl fmt::Display for ContractError {
             } => write!(
                 formatter,
                 "selected token ID {token_id} for row {row} is outside [0, {vocab_size})"
+            ),
+            Self::TargetTokenIdOutOfI32Range { token, token_id } => write!(
+                formatter,
+                "target token ID {token_id} at flattened position {token} does not fit int32"
+            ),
+            Self::DraftTokenCapacityExceeded {
+                draft_tokens,
+                capacity,
+            } => write!(
+                formatter,
+                "flattened draft token count {draft_tokens} exceeds ragged capacity {capacity}"
+            ),
+            Self::InvalidCumulativeDraftLength {
+                request,
+                previous,
+                current,
+                draft_tokens,
+                max_draft_tokens,
+            } => write!(
+                formatter,
+                "cumulative draft boundary {current} for request {request} is invalid after {previous}; total={draft_tokens}, per-request maximum={max_draft_tokens}"
+            ),
+            Self::FinalCumulativeDraftLengthMismatch { expected, actual } => write!(
+                formatter,
+                "final cumulative draft boundary must equal {expected}, got {actual}"
             ),
             Self::InvalidProbability {
                 parameter,

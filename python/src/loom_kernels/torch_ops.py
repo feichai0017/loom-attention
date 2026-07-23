@@ -40,6 +40,10 @@ from .ops.sampling import (
     supports_greedy_sample_logprobs,
     supports_selected_token_logprobs,
 )
+from .ops.speculative import (
+    greedy_speculative_verify,
+    supports_greedy_speculative_verify,
+)
 from .ops.telemetry import (
     Operator,
     bridge_abi_version,
@@ -54,6 +58,7 @@ __all__ = [
     "add_rms_norm_",
     "bridge_abi_version",
     "greedy_sample_logprobs",
+    "greedy_speculative_verify",
     "launch_count",
     "min_p_filter_",
     "paged_decode_attention",
@@ -71,6 +76,7 @@ __all__ = [
     "silu_and_mul_out",
     "supports_add_rms_norm",
     "supports_greedy_sample_logprobs",
+    "supports_greedy_speculative_verify",
     "supports_min_p_filter",
     "supports_paged_decode_attention",
     "supports_rms_norm",

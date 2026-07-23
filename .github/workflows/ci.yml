@@ -47,6 +47,8 @@ jobs:
           tar -tf target/package/loom-cuda-sys-*.crate > /tmp/loom-cuda-sys-package-files
           grep -Eq '/cuda/src/paged_decode_attention\.cu$' \
             /tmp/loom-cuda-sys-package-files
+          grep -Eq '/cuda/src/greedy_speculative_verify\.cu$' \
+            /tmp/loom-cuda-sys-package-files
 
   benchmark-tools:
     name: python package · benchmark syntax

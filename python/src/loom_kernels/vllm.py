@@ -19,6 +19,7 @@ ACT_QUANT_OVERRIDE_KEY = "silu_and_mul_dynamic_fp8"
 ACT_QUANT_OVERRIDE_ENV = "LOOM_KERNELS_ENABLE_SILU_AND_MUL_FP8"
 ROPE_PAGED_KV_OVERRIDE_KEY = "rope_paged_kv"
 GREEDY_SAMPLE_LOGPROBS_OVERRIDE_KEY = "greedy_sample_logprobs"
+GREEDY_SPECULATIVE_VERIFY_OVERRIDE_KEY = "greedy_speculative_verify"
 SELECTED_TOKEN_LOGPROBS_OVERRIDE_KEY = "selected_token_logprobs"
 MIN_P_OVERRIDE_KEY = "min_p_filter"
 MIN_P_OVERRIDE_ENV = "LOOM_KERNELS_ENABLE_MIN_P"
@@ -37,6 +38,10 @@ _GREEDY_SAMPLE_LOGPROBS_ORIGINAL_FORWARD: Any | None = None
 _GREEDY_SAMPLE_LOGPROBS_CAN_USE_FAST_PATH: Any | None = None
 _GREEDY_SAMPLE_LOGPROBS_FIRST_CONTRACT: dict[str, Any] | None = None
 _GREEDY_SAMPLE_LOGPROBS_FIRST_REJECTION: dict[str, Any] | None = None
+_GREEDY_SPECULATIVE_VERIFY_REGISTERED = False
+_GREEDY_SPECULATIVE_VERIFY_ORIGINAL: Any | None = None
+_GREEDY_SPECULATIVE_VERIFY_FIRST_CONTRACT: dict[str, Any] | None = None
+_GREEDY_SPECULATIVE_VERIFY_FIRST_REJECTION: dict[str, Any] | None = None
 _SELECTED_TOKEN_LOGPROBS_REGISTERED = False
 _SELECTED_TOKEN_LOGPROBS_ORIGINAL_FORWARD: Any | None = None
 _SELECTED_TOKEN_LOGPROBS_FIRST_CONTRACT: dict[str, Any] | None = None
@@ -852,6 +857,125 @@ def register_vllm_selected_token_logprobs() -> str | None:
     return SELECTED_TOKEN_LOGPROBS_OVERRIDE_KEY
 
 
+def register_vllm_greedy_speculative_verify() -> str | None:
+    """Route vLLM's deterministic greedy draft verification through Loom.
+
+    vLLM remains responsible for draft generation, target-logit processing,
+    target argmax, bonus-token sampling, and every stochastic rejection path.
+    Loom replaces only the standard all-greedy ragged verify/compact kernel.
+    """
+    global _GREEDY_SPECULATIVE_VERIFY_ORIGINAL
+    global _GREEDY_SPECULATIVE_VERIFY_REGISTERED
+    if _GREEDY_SPECULATIVE_VERIFY_REGISTERED:
+        return GREEDY_SPECULATIVE_VERIFY_OVERRIDE_KEY
+    if not torch_extension_available() or not supports_installed_vllm():
+        return None
+
+    from .torch_ops import (
+        greedy_speculative_verify,
+        supports_greedy_speculative_verify,
+    )
+    from vllm.v1.sample import rejection_sampler
+
+    load_torch_extension()
+    original = rejection_sampler.rejection_sample
+
+    def verify(
+        draft_token_ids: torch.Tensor,
+        num_draft_tokens: list[int],
+        max_spec_len: int,
+        cu_num_draft_tokens: torch.Tensor,
+        draft_probs: torch.Tensor | None,
+        target_logits: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        sampling_metadata: Any,
+        synthetic_mode: bool = False,
+        synthetic_conditional_rates: torch.Tensor | None = None,
+        use_fp64_gumbel: bool = False,
+    ) -> torch.Tensor:
+        global _GREEDY_SPECULATIVE_VERIFY_FIRST_CONTRACT
+        global _GREEDY_SPECULATIVE_VERIFY_FIRST_REJECTION
+        basic_contract = bool(
+            sampling_metadata.all_greedy
+            and not synthetic_mode
+            and isinstance(max_spec_len, int)
+            and max_spec_len > 0
+            and len(num_draft_tokens) == cu_num_draft_tokens.numel()
+            and target_logits.device.type == "cuda"
+            and target_logits.dim() == 2
+            and target_logits.shape[0] == draft_token_ids.numel()
+        )
+        if basic_contract:
+            target_token_ids = target_logits.argmax(dim=-1)
+            use_fast_path = supports_greedy_speculative_verify(
+                draft_token_ids,
+                target_token_ids,
+                bonus_token_ids,
+                cu_num_draft_tokens,
+                max_spec_len,
+            )
+        else:
+            target_token_ids = None
+            use_fast_path = False
+
+        if not use_fast_path:
+            if _GREEDY_SPECULATIVE_VERIFY_FIRST_REJECTION is None:
+                _GREEDY_SPECULATIVE_VERIFY_FIRST_REJECTION = {
+                    "all_greedy": sampling_metadata.all_greedy,
+                    "synthetic_mode": synthetic_mode,
+                    "draft_shape": list(draft_token_ids.shape),
+                    "draft_dtype": str(draft_token_ids.dtype),
+                    "target_logits_shape": list(target_logits.shape),
+                    "bonus_shape": list(bonus_token_ids.shape),
+                    "cumulative_shape": list(cu_num_draft_tokens.shape),
+                    "max_spec_len": max_spec_len,
+                }
+            fallback = _GREEDY_SPECULATIVE_VERIFY_ORIGINAL
+            if fallback is None:
+                raise RuntimeError(
+                    "vLLM greedy speculative fallback is unavailable"
+                )
+            return fallback(
+                draft_token_ids,
+                num_draft_tokens,
+                max_spec_len,
+                cu_num_draft_tokens,
+                draft_probs,
+                target_logits,
+                bonus_token_ids,
+                sampling_metadata,
+                synthetic_mode,
+                synthetic_conditional_rates,
+                use_fp64_gumbel,
+            )
+
+        assert target_token_ids is not None
+        if _GREEDY_SPECULATIVE_VERIFY_FIRST_CONTRACT is None:
+            _GREEDY_SPECULATIVE_VERIFY_FIRST_CONTRACT = {
+                "requests": len(num_draft_tokens),
+                "draft_tokens": draft_token_ids.numel(),
+                "max_spec_len": max_spec_len,
+                "draft_dtype": str(draft_token_ids.dtype),
+                "target_dtype": str(target_token_ids.dtype),
+                "bonus_shape": list(bonus_token_ids.shape),
+                "cumulative_dtype": str(cu_num_draft_tokens.dtype),
+            }
+        output_token_ids, _, _ = greedy_speculative_verify(
+            draft_token_ids,
+            target_token_ids,
+            bonus_token_ids,
+            cu_num_draft_tokens,
+            max_spec_len,
+        )
+        return output_token_ids
+
+    verify.__module__ = __name__
+    _GREEDY_SPECULATIVE_VERIFY_ORIGINAL = original
+    rejection_sampler.rejection_sample = verify
+    _GREEDY_SPECULATIVE_VERIFY_REGISTERED = True
+    return GREEDY_SPECULATIVE_VERIFY_OVERRIDE_KEY
+
+
 def register_vllm_min_p() -> str | None:
     """Replace vLLM 0.24/0.25 allocating min-p with Loom's in-place kernel."""
     global _MIN_P_ORIGINAL_APPLY
@@ -985,6 +1109,15 @@ def provider_metadata() -> dict[str, Any]:
         "greedy_sample_logprobs_first_rejection": (
             _GREEDY_SAMPLE_LOGPROBS_FIRST_REJECTION
         ),
+        "greedy_speculative_verify_override": (
+            _GREEDY_SPECULATIVE_VERIFY_REGISTERED
+        ),
+        "greedy_speculative_verify_first_contract": (
+            _GREEDY_SPECULATIVE_VERIFY_FIRST_CONTRACT
+        ),
+        "greedy_speculative_verify_first_rejection": (
+            _GREEDY_SPECULATIVE_VERIFY_FIRST_REJECTION
+        ),
         "selected_token_logprobs_override": _SELECTED_TOKEN_LOGPROBS_REGISTERED,
         "selected_token_logprobs_first_contract": (
             _SELECTED_TOKEN_LOGPROBS_FIRST_CONTRACT
@@ -1000,6 +1133,7 @@ __all__ = [
     "ACT_QUANT_OVERRIDE_KEY",
     "DEFAULT_PROVIDER",
     "GREEDY_SAMPLE_LOGPROBS_OVERRIDE_KEY",
+    "GREEDY_SPECULATIVE_VERIFY_OVERRIDE_KEY",
     "MIN_P_FAST_PATH_MIN_ROWS",
     "MIN_P_FAST_PATH_MIN_VOCAB_SIZE",
     "MIN_P_OVERRIDE_ENV",
@@ -1020,6 +1154,7 @@ __all__ = [
     "register_vllm_min_p",
     "register_vllm_paged_decode_attention",
     "register_vllm_greedy_sample_logprobs",
+    "register_vllm_greedy_speculative_verify",
     "register_vllm_rope_paged_kv",
     "register_vllm_selected_token_logprobs",
     "register_vllm_silu_and_mul",

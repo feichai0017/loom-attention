@@ -22,6 +22,7 @@ class Operator(IntEnum):
     SELECTED_TOKEN_LOGPROBS = 7
     MIN_P_FILTER = 8
     PAGED_DECODE_ATTENTION = 9
+    GREEDY_SPECULATIVE_VERIFY = 10
 
 
 def _operator_id(operator: Operator) -> int:

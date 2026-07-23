@@ -6,6 +6,7 @@ use crate::logits::MinPFilterSpec;
 use crate::norm::{AddRmsNormSpec, RmsNormDynamicFp8Spec, RmsNormSpec};
 use crate::rope_kv::{RopePagedKvWriteSpec, RotaryEmbeddingSpec};
 use crate::sampling::{GreedySampleLogprobsSpec, SelectedTokenLogprobsSpec};
+use crate::speculative::GreedySpeculativeVerifySpec;
 
 /// Backend-independent operator description.
 #[derive(Clone, Debug, PartialEq)]
@@ -18,6 +19,7 @@ pub enum OperatorSpec {
     GreedySampleLogprobs(GreedySampleLogprobsSpec),
     SelectedTokenLogprobs(SelectedTokenLogprobsSpec),
     MinPFilter(MinPFilterSpec),
+    GreedySpeculativeVerify(GreedySpeculativeVerifySpec),
     PagedDecodeAttention(PagedDecodeAttentionSpec),
     RotaryEmbedding(RotaryEmbeddingSpec),
     RopePagedKvWrite(RopePagedKvWriteSpec),

@@ -20,6 +20,9 @@ _greedy_sample_logprobs = torch.ops.loom_kernels.greedy_sample_logprobs.default
 _selected_token_logprobs = (
     torch.ops.loom_kernels.selected_token_logprobs.default
 )
+_greedy_speculative_verify = (
+    torch.ops.loom_kernels.greedy_speculative_verify.default
+)
 _min_p_filter = torch.ops.loom_kernels.min_p_filter_.default
 _paged_decode_attention = torch.ops.loom_kernels.paged_decode_attention.default
 _rope_paged_kv_write = torch.ops.loom_kernels.rope_paged_kv_write_.default

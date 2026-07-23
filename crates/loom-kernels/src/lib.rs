@@ -17,6 +17,7 @@ pub mod norm;
 pub mod quantization;
 pub mod rope_kv;
 pub mod sampling;
+pub mod speculative;
 
 pub use activation::*;
 pub use attention::*;
@@ -27,6 +28,7 @@ pub use norm::*;
 pub use quantization::*;
 pub use rope_kv::*;
 pub use sampling::*;
+pub use speculative::*;
 
 #[cfg(test)]
 mod tests;

@@ -12,6 +12,7 @@ from loom_kernels.vllm import (
     ACT_QUANT_OVERRIDE_KEY,
     DEFAULT_PROVIDER,
     GREEDY_SAMPLE_LOGPROBS_OVERRIDE_KEY,
+    GREEDY_SPECULATIVE_VERIFY_OVERRIDE_KEY,
     MIN_P_OVERRIDE_ENV,
     MIN_P_OVERRIDE_KEY,
     PAGED_DECODE_OVERRIDE_ENV,
@@ -28,6 +29,7 @@ from loom_kernels.vllm import (
     register_vllm_min_p,
     register_vllm_paged_decode_attention,
     register_vllm_greedy_sample_logprobs,
+    register_vllm_greedy_speculative_verify,
     register_vllm_rope_paged_kv,
     register_vllm_selected_token_logprobs,
     register_vllm_silu_and_mul,
@@ -105,6 +107,95 @@ def test_vllm_greedy_sample_logprobs_fast_path_matches_sampler_semantics():
     )
     assert launch_count(Operator.GREEDY_SAMPLE_LOGPROBS) == 1
     assert provider_metadata()["greedy_sample_logprobs_override"] is True
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_vllm_greedy_speculative_verify_matches_rejection_semantics(
+    monkeypatch,
+):
+    from vllm.v1.sample import rejection_sampler
+
+    import loom_kernels.vllm as loom_vllm
+    from loom_kernels.torch_ops import (
+        Operator,
+        launch_count,
+        reset_launch_count,
+    )
+
+    assert (
+        register_vllm_greedy_speculative_verify()
+        == GREEDY_SPECULATIVE_VERIFY_OVERRIDE_KEY
+    )
+    draft = torch.tensor(
+        [10, 11, 12, 20, 21, 22, 23],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    target_ids = torch.tensor(
+        [10, 99, 12, 20, 21, 22, 23],
+        dtype=torch.int64,
+        device="cuda",
+    )
+    target_logits = torch.full(
+        (7, 128), -100.0, dtype=torch.float32, device="cuda"
+    )
+    target_logits.scatter_(1, target_ids.unsqueeze(1), 100.0)
+    bonus = torch.tensor(
+        [[100], [101], [102]], dtype=torch.int32, device="cuda"
+    )
+    cumulative = torch.tensor([3, 3, 7], dtype=torch.int32, device="cuda")
+    metadata = SimpleNamespace(all_greedy=True)
+
+    reset_launch_count(Operator.GREEDY_SPECULATIVE_VERIFY)
+    output = rejection_sampler.rejection_sample(
+        draft,
+        [3, 0, 4],
+        4,
+        cumulative,
+        None,
+        target_logits,
+        bonus,
+        metadata,
+    )
+    torch.cuda.synchronize()
+
+    assert output.tolist() == [
+        [10, 99, -1, -1, -1],
+        [101, -1, -1, -1, -1],
+        [20, 21, 22, 23, 102],
+    ]
+    assert launch_count(Operator.GREEDY_SPECULATIVE_VERIFY) == 1
+    assert provider_metadata()["greedy_speculative_verify_override"] is True
+
+    sentinel = torch.empty(0, dtype=torch.int32, device="cuda")
+    fallback_calls = 0
+
+    def fallback(*args, **kwargs):
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return sentinel
+
+    monkeypatch.setattr(
+        loom_vllm,
+        "_GREEDY_SPECULATIVE_VERIFY_ORIGINAL",
+        fallback,
+    )
+    metadata.all_greedy = False
+    reset_launch_count(Operator.GREEDY_SPECULATIVE_VERIFY)
+    fallback_output = rejection_sampler.rejection_sample(
+        draft,
+        [3, 0, 4],
+        4,
+        cumulative,
+        None,
+        target_logits,
+        bonus,
+        metadata,
+    )
+
+    assert fallback_output is sentinel
+    assert fallback_calls == 1
+    assert launch_count(Operator.GREEDY_SPECULATIVE_VERIFY) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

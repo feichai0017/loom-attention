@@ -142,6 +142,17 @@ int loom_cuda_selected_token_logprobs_bf16(
     int64_t* ranks, uint32_t rows, uint32_t vocab_size, uint64_t row_stride,
     void* stream);
 
+// Deterministic greedy speculative verification over flattened ragged draft
+// tokens. cumulative_draft_lengths is inclusive and has one int32 entry per
+// request. Output is contiguous [requests, max_draft_tokens + 1], padded with
+// -1. Accepted and emitted lengths contain one int32 value per request.
+int loom_cuda_greedy_speculative_verify(
+    const int32_t* draft_token_ids, const int64_t* target_token_ids,
+    const int32_t* bonus_token_ids,
+    const int32_t* cumulative_draft_lengths, int32_t* output_token_ids,
+    int32_t* accepted_lengths, int32_t* emitted_lengths, uint32_t requests,
+    uint32_t draft_tokens, uint32_t max_draft_tokens, void* stream);
+
 int loom_cuda_min_p_filter_f32(float* logits, const float* min_p,
                                uint32_t rows, uint32_t vocab_size,
                                uint64_t row_stride, void* stream);

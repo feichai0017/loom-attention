@@ -28,6 +28,8 @@ pub mod runtime;
 #[cfg(feature = "cuda")]
 mod silu_and_mul;
 #[cfg(feature = "cuda")]
+mod speculative;
+#[cfg(feature = "cuda")]
 pub use rms_norm::CudaBackend;
 #[cfg(feature = "cuda")]
 pub use silu_and_mul::{Fp8ScaleLayout, SiluAndMulDynamicFp8Options};

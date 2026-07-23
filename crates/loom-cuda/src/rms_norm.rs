@@ -381,6 +381,7 @@ impl<S: CudaStreamHandle> Backend for CudaBackend<S> {
             OperatorSpec::MinPFilter(_) => {
                 Support::Unsupported("CUDA min-p filtering supports F32, FP16, and BF16 logits")
             }
+            OperatorSpec::GreedySpeculativeVerify(_) => Support::Supported,
             OperatorSpec::PagedDecodeAttention(spec)
                 if crate::paged_decode::supports_spec(*spec) =>
             {

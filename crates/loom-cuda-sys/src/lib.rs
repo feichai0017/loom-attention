@@ -225,6 +225,20 @@ unsafe extern "C" {
         stream: *mut c_void,
     ) -> c_int;
 
+    pub fn loom_cuda_greedy_speculative_verify(
+        draft_token_ids: *const i32,
+        target_token_ids: *const i64,
+        bonus_token_ids: *const i32,
+        cumulative_draft_lengths: *const i32,
+        output_token_ids: *mut i32,
+        accepted_lengths: *mut i32,
+        emitted_lengths: *mut i32,
+        requests: u32,
+        draft_tokens: u32,
+        max_draft_tokens: u32,
+        stream: *mut c_void,
+    ) -> c_int;
+
     pub fn loom_cuda_min_p_filter_f32(
         logits: *mut f32,
         min_p: *const f32,

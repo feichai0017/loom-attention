@@ -31,6 +31,7 @@ enum loom_cuda_bridge_operator {
   LOOM_CUDA_BRIDGE_SELECTED_TOKEN_LOGPROBS = 7,
   LOOM_CUDA_BRIDGE_MIN_P_FILTER = 8,
   LOOM_CUDA_BRIDGE_PAGED_DECODE_ATTENTION = 9,
+  LOOM_CUDA_BRIDGE_GREEDY_SPECULATIVE_VERIFY = 10,
 };
 
 uint32_t loom_cuda_bridge_abi_version(void);
@@ -77,6 +78,17 @@ int loom_cuda_bridge_selected_token_logprobs(
     const int64_t* token_ids, uint64_t token_id_elements, float* logprobs,
     uint64_t logprob_elements, int64_t* ranks, uint64_t rank_elements,
     uint32_t rows, uint32_t vocab_size, uint64_t row_stride, void* stream);
+
+int loom_cuda_bridge_greedy_speculative_verify(
+    const int32_t* draft_token_ids, uint64_t draft_token_id_elements,
+    const int64_t* target_token_ids, uint64_t target_token_id_elements,
+    const int32_t* bonus_token_ids, uint64_t bonus_token_id_elements,
+    const int32_t* cumulative_draft_lengths,
+    uint64_t cumulative_draft_length_elements, int32_t* output_token_ids,
+    uint64_t output_token_id_elements, int32_t* accepted_lengths,
+    uint64_t accepted_length_elements, int32_t* emitted_lengths,
+    uint64_t emitted_length_elements, uint32_t requests,
+    uint32_t draft_tokens, uint32_t max_draft_tokens, void* stream);
 
 int loom_cuda_bridge_min_p_filter(
     uint32_t dtype, void* logits, uint64_t logits_elements,

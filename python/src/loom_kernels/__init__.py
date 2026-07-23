@@ -63,6 +63,13 @@ def greedy_sample_logprobs(*args: Any, **kwargs: Any) -> Any:
     return implementation(*args, **kwargs)
 
 
+def greedy_speculative_verify(*args: Any, **kwargs: Any) -> Any:
+    """Lazily verify and compact deterministic speculative draft tokens."""
+    from .torch_ops import greedy_speculative_verify as implementation
+
+    return implementation(*args, **kwargs)
+
+
 def selected_token_logprobs(*args: Any, **kwargs: Any) -> Any:
     """Lazily normalize and rank one caller-selected token per logits row."""
     from .torch_ops import selected_token_logprobs as implementation
@@ -123,6 +130,7 @@ __all__ = [
     "__version__",
     "add_rms_norm_",
     "greedy_sample_logprobs",
+    "greedy_speculative_verify",
     "min_p_filter_",
     "native_build_info",
     "paged_decode_attention",
