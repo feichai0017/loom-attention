@@ -20,7 +20,9 @@ from loom_kernels.vllm import (
     SELECTED_TOKEN_LOGPROBS_OVERRIDE_KEY,
     SILU_OVERRIDE_ENV,
     SILU_OVERRIDE_KEY,
+    SUPPORTED_VLLM_SERIES,
     configure_vllm_rope_paged_kv,
+    installed_vllm_version,
     provider_metadata,
     register_vllm_ir,
     register_vllm_min_p,
@@ -30,13 +32,36 @@ from loom_kernels.vllm import (
     register_vllm_selected_token_logprobs,
     register_vllm_silu_and_mul,
     register_vllm_silu_and_mul_dynamic_fp8,
+    supports_installed_vllm,
     supports_vllm_paged_decode_shape,
 )
+
+
+def test_installed_vllm_series_is_supported():
+    assert SUPPORTED_VLLM_SERIES == ((0, 24), (0, 25))
+    assert supports_installed_vllm()
+    assert installed_vllm_version() is not None
+    assert provider_metadata()["vllm_supported"] is True
+
+
+def test_unqualified_vllm_series_is_rejected(monkeypatch):
+    import loom_kernels.vllm as integration
+
+    monkeypatch.setattr(
+        integration, "installed_vllm_version", lambda: "0.26.0"
+    )
+    assert integration.supports_installed_vllm() is False
+    assert integration.register_vllm_ir() is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_vllm_greedy_sample_logprobs_fast_path_matches_sampler_semantics():
     from vllm.v1.sample.sampler import Sampler
+
+    from loom_kernels.torch_ops import (
+        greedy_sample_logprobs_rust_bridge_launch_count,
+        reset_greedy_sample_logprobs_rust_bridge_launch_count,
+    )
 
     assert (
         register_vllm_greedy_sample_logprobs()
@@ -53,6 +78,7 @@ def test_vllm_greedy_sample_logprobs_fast_path_matches_sampler_semantics():
         logitsprocs=SimpleNamespace(non_argmax_invariant=[]),
         thinking_budget_state_holder=None,
     )
+    reset_greedy_sample_logprobs_rust_bridge_launch_count()
     output = Sampler().forward(logits, metadata)
     expected_ids = logits.argmax(-1).to(torch.int32)
     expected_logprobs = logits.log_softmax(-1).gather(
@@ -76,6 +102,7 @@ def test_vllm_greedy_sample_logprobs_fast_path_matches_sampler_semantics():
         output.logprobs_tensors.selected_token_ranks,
         expected_ranks,
     )
+    assert greedy_sample_logprobs_rust_bridge_launch_count() == 1
     assert provider_metadata()["greedy_sample_logprobs_override"] is True
 
 

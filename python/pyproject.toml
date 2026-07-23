@@ -25,7 +25,7 @@ Repository = "https://github.com/feichai0017/loom-kernels"
 
 [project.optional-dependencies]
 torch = ["torch>=2.4"]
-vllm = ["vllm>=0.24,<0.25"]
+vllm = ["vllm>=0.24,<0.26"]
 test = ["pytest>=8"]
 
 [project.entry-points."vllm.general_plugins"]

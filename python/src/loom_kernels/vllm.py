@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 import torch
@@ -11,6 +12,7 @@ from ._native import native_available
 
 
 DEFAULT_PROVIDER = "loom_cuda"
+SUPPORTED_VLLM_SERIES = ((0, 24), (0, 25))
 SILU_OVERRIDE_KEY = "SiluAndMul"
 SILU_OVERRIDE_ENV = "LOOM_KERNELS_ENABLE_SILU_AND_MUL"
 ACT_QUANT_OVERRIDE_KEY = "silu_and_mul_dynamic_fp8"
@@ -55,6 +57,29 @@ def _env_enabled(name: str) -> bool:
         "yes",
         "on",
     }
+
+
+def installed_vllm_version() -> str | None:
+    """Return the installed vLLM release, if the package is present."""
+    try:
+        return version("vllm")
+    except PackageNotFoundError:
+        return None
+
+
+def supports_installed_vllm() -> bool:
+    """Return whether the installed vLLM series is qualified by Loom."""
+    release = installed_vllm_version()
+    if release is None:
+        return False
+    components = release.split(".", 2)
+    if len(components) < 2:
+        return False
+    try:
+        series = (int(components[0]), int(components[1]))
+    except ValueError:
+        return False
+    return series in SUPPORTED_VLLM_SERIES
 
 
 def _silu_override_requested() -> bool:
@@ -102,6 +127,8 @@ def register_vllm_silu_and_mul() -> str | None:
         return SILU_OVERRIDE_KEY
     if not native_available():
         return None
+    if not supports_installed_vllm():
+        return None
 
     from vllm.model_executor.custom_op import CustomOp
     from vllm.model_executor.layers.activation import SiluAndMul
@@ -136,6 +163,8 @@ def register_vllm_silu_and_mul_dynamic_fp8() -> str | None:
         return ACT_QUANT_OVERRIDE_KEY
     if not native_available():
         return None
+    if not supports_installed_vllm():
+        return None
 
     from .torch_ops import adapter_backend
 
@@ -156,7 +185,7 @@ def register_vllm_silu_and_mul_dynamic_fp8() -> str | None:
 
 
 def register_vllm_rope_paged_kv() -> str | None:
-    """Teach vLLM 0.24 CUDA attention backends to call Loom's fused op.
+    """Teach vLLM 0.24/0.25 CUDA attention backends to call Loom's fused op.
 
     Registration only installs the backend capability and implementation. Use
     :func:`configure_vllm_rope_paged_kv` before constructing ``vllm.LLM`` to
@@ -173,9 +202,7 @@ def register_vllm_rope_paged_kv() -> str | None:
     if adapter_backend() != "cpp-dispatch":
         return None
 
-    from importlib.metadata import version
-
-    if not version("vllm").startswith("0.24."):
+    if not supports_installed_vllm():
         return None
 
     from vllm.v1.attention.backend import AttentionType
@@ -277,7 +304,7 @@ def configure_vllm_rope_paged_kv(
 ) -> Any:
     """Return a vLLM compilation config with Loom RoPE+KV fusion enabled.
 
-    vLLM 0.24 labels this pass ROCm-only during initial ``PassConfig``
+    vLLM labels this pass ROCm-only during initial ``PassConfig``
     validation. Setting the flag after constructing ``CompilationConfig`` is
     intentional: Loom supplies the missing CUDA backend implementation.
     """
@@ -285,7 +312,8 @@ def configure_vllm_rope_paged_kv(
         raise ValueError("max_token_num must be positive")
     if register_vllm_rope_paged_kv() is None:
         raise RuntimeError(
-            "Loom RoPE+paged-KV requires vLLM 0.24 and the C++ dispatcher bridge"
+            "Loom RoPE+paged-KV requires vLLM 0.24/0.25 and the C++ "
+            "dispatcher bridge"
         )
 
     from vllm.config import CompilationConfig
@@ -309,7 +337,7 @@ def configure_vllm_rope_paged_kv(
 
 
 def register_vllm_paged_decode_attention() -> str | None:
-    """Install a measured-shape vLLM 0.24 FlashAttention decode fast path."""
+    """Install a measured-shape vLLM 0.24/0.25 FlashAttention decode path."""
     global _PAGED_DECODE_CAN_USE_FAST_PATH
     global _PAGED_DECODE_ORIGINAL_FORWARD
     global _PAGED_DECODE_REGISTERED
@@ -326,9 +354,7 @@ def register_vllm_paged_decode_attention() -> str | None:
     if adapter_backend() != "cpp-dispatch":
         return None
 
-    from importlib.metadata import version
-
-    if not version("vllm").startswith("0.24."):
+    if not supports_installed_vllm():
         return None
 
     from vllm.v1.attention.backend import AttentionType
@@ -517,7 +543,7 @@ def register_vllm_paged_decode_attention() -> str | None:
 
 
 def register_vllm_greedy_sample_logprobs() -> str | None:
-    """Install the deterministic vLLM 0.24 greedy+logprob fast path.
+    """Install the deterministic vLLM 0.24/0.25 greedy+logprob fast path.
 
     The override is deliberately narrow: all requests must be greedy, request
     only the sampled token's raw logprob (`max_num_logprobs == 0`), and have no
@@ -537,9 +563,7 @@ def register_vllm_greedy_sample_logprobs() -> str | None:
     if adapter_backend() != "cpp-dispatch":
         return None
 
-    from importlib.metadata import version
-
-    if not version("vllm").startswith("0.24."):
+    if not supports_installed_vllm():
         return None
 
     from vllm.v1.outputs import LogprobsTensors, SamplerOutput
@@ -689,7 +713,7 @@ def register_vllm_greedy_sample_logprobs() -> str | None:
 
 
 def register_vllm_selected_token_logprobs() -> str | None:
-    """Avoid full-vocabulary raw log-softmax after vLLM 0.24 sampling.
+    """Avoid full-vocabulary raw log-softmax after vLLM 0.24/0.25 sampling.
 
     vLLM remains responsible for masks, processors, penalties, temperature,
     top-k/top-p, RNG, and token selection. For BF16/FP16 logits requesting
@@ -711,9 +735,7 @@ def register_vllm_selected_token_logprobs() -> str | None:
     if adapter_backend() != "cpp-dispatch":
         return None
 
-    from importlib.metadata import version
-
-    if not version("vllm").startswith("0.24."):
+    if not supports_installed_vllm():
         return None
 
     from vllm.v1.outputs import LogprobsTensors, SamplerOutput
@@ -854,7 +876,7 @@ def register_vllm_selected_token_logprobs() -> str | None:
 
 
 def register_vllm_min_p() -> str | None:
-    """Replace vLLM 0.24's allocating min-p path with Loom's in-place kernel."""
+    """Replace vLLM 0.24/0.25 allocating min-p with Loom's in-place kernel."""
     global _MIN_P_ORIGINAL_APPLY
     global _MIN_P_REGISTERED
     if _MIN_P_REGISTERED:
@@ -871,9 +893,7 @@ def register_vllm_min_p() -> str | None:
     if adapter_backend() != "cpp-dispatch":
         return None
 
-    from importlib.metadata import version
-
-    if not version("vllm").startswith("0.24."):
+    if not supports_installed_vllm():
         return None
 
     from vllm.v1.sample.logits_processor.builtin import MinPLogitsProcessor
@@ -899,8 +919,11 @@ def register_vllm_min_p() -> str | None:
     return MIN_P_OVERRIDE_KEY
 
 
-def register_vllm_ir(provider: str = DEFAULT_PROVIDER) -> str:
+def register_vllm_ir(provider: str = DEFAULT_PROVIDER) -> str | None:
     """Register Loom as an in-place fused_add_rms_norm IR provider."""
+    if not supports_installed_vllm():
+        return None
+
     from vllm import ir
     import vllm.ir.ops.layernorm  # noqa: F401 - registers the IR operation
 
@@ -963,6 +986,11 @@ def provider_metadata() -> dict[str, Any]:
 
     return {
         "provider": DEFAULT_PROVIDER,
+        "vllm_version": installed_vllm_version(),
+        "vllm_supported": supports_installed_vllm(),
+        "supported_vllm_series": [
+            f"{major}.{minor}" for major, minor in SUPPORTED_VLLM_SERIES
+        ],
         "native_available": native_available(),
         "operator": "fused_add_rms_norm",
         "inplace": True,
@@ -1019,8 +1047,10 @@ __all__ = [
     "SELECTED_TOKEN_LOGPROBS_OVERRIDE_KEY",
     "SILU_OVERRIDE_ENV",
     "SILU_OVERRIDE_KEY",
-    "provider_metadata",
+    "SUPPORTED_VLLM_SERIES",
     "configure_vllm_rope_paged_kv",
+    "installed_vllm_version",
+    "provider_metadata",
     "register_vllm_ir",
     "register_vllm_min_p",
     "register_vllm_paged_decode_attention",
@@ -1029,5 +1059,6 @@ __all__ = [
     "register_vllm_selected_token_logprobs",
     "register_vllm_silu_and_mul",
     "register_vllm_silu_and_mul_dynamic_fp8",
+    "supports_installed_vllm",
     "supports_vllm_paged_decode_shape",
 ]

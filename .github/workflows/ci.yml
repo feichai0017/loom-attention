@@ -69,11 +69,20 @@ jobs:
           python -m pip install --force-reinstall /tmp/loom-kernels-wheel/*.whl
           python -m pip check
           python - <<'PY'
-          from importlib.metadata import entry_points, version
+          from importlib.metadata import entry_points, requires, version
 
           import loom_kernels
 
           assert version("loom-kernels") == loom_kernels.__version__
+          dependencies = [
+              requirement.replace(" ", "")
+              for requirement in (requires("loom-kernels") or [])
+          ]
+          assert any(
+              requirement.startswith("vllm<0.26,>=0.24;")
+              and 'extra=="vllm"' in requirement
+              for requirement in dependencies
+          )
           plugins = entry_points(group="vllm.general_plugins")
           assert any(plugin.name == "loom_kernels" for plugin in plugins)
           print(f"loom-kernels {loom_kernels.__version__}")
