@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-23",
+  "purpose": "vLLM minor-version compatibility and checked Rust greedy bridge gate",
+  "tested_revision": "3ae42107143fd3f4befbe524858b9f3b7759ade0",
+  "hardware": {
+    "gpu": "NVIDIA H20",
+    "compute_capability": "sm_90",
+    "driver": "535.161.08"
+  },
+  "toolchain": {
+    "cuda": "13.1 (compiler build 37061995)",
+    "torch": "2.11.0+cu130",
+    "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "python": "3.11.2"
+  },
+  "vllm_matrix": [
+    {
+      "version": "0.24.0",
+      "package": "existing isolated wheel environment",
+      "python_gpu_suite": {
+        "passed": 183,
+        "failed": 0,
+        "duration_seconds": 8.11
+      }
+    },
+    {
+      "version": "0.25.1",
+      "package": "official cp38-abi3 manylinux_2_28 x86_64 wheel",
+      "wheel_sha256": "16fc7a28df1576eb6f7ca0455026551b8f9adb674c19c66059359ef3e964bd1e",
+      "binary_module": "vllm/_C_stable_libtorch.abi3.so",
+      "dependency_note": "Torch and non-vLLM dependencies were reused from the existing CUDA environment; the vLLM package and compiled extension came from the official 0.25.1 wheel.",
+      "python_gpu_suite": {
+        "passed": 183,
+        "failed": 0,
+        "duration_seconds": 7.86
+      }
+    }
+  ],
+  "focused_gate": {
+    "tests": [
+      "python/tests/test_greedy_sample_logprobs.py",
+      "python/tests/test_vllm_ir.py"
+    ],
+    "passed": 40,
+    "failed": 0,
+    "duration_seconds": 6.79
+  },
+  "commands": [
+    "CUDA_HOME=/usr/local/cuda-13.1 LOOM_CUDA_ARCHS=90 cargo clippy -p loom-cuda-bridge --features cuda --all-targets -- -D warnings",
+    "CUDA_HOME=/usr/local/cuda-13.1 LOOM_CUDA_ARCHS=90 cargo test -p loom-cuda-bridge --features cuda --release",
+    "CUDA_HOME=/usr/local/cuda-13.1 LOOM_CUDA_ARCHS=90 cargo test -p loom-cuda --features cuda --release",
+    "python -m pytest -q python/tests",
+    "python -m pytest -q python/tests/test_greedy_sample_logprobs.py python/tests/test_vllm_ir.py"
+  ],
+  "rust_cuda_gate": {
+    "loom_cuda_bridge": {
+      "passed": 2,
+      "failed": 0
+    },
+    "loom_cuda": {
+      "passed": 7,
+      "failed": 0
+    },
+    "release_feature_build": "passed"
+  },
+  "bridge_contract": {
+    "operator": "greedy_sample_logprobs",
+    "contiguous_logits": "checked loom-cuda-bridge path; launch telemetry equals one",
+    "padded_row_stride": "existing raw CUDA ABI fallback; Rust bridge launch telemetry remains zero",
+    "copies": 0,
+    "synchronization_added": false,
+    "stream": "framework current CUDA stream"
+  },
+  "decision": {
+    "vllm_supported_range": ">=0.24,<0.26",
+    "accepted": true,
+    "claim": "The current Loom adapters and GPU test suite are compatible with the official vLLM 0.24.0 and 0.25.1 packages on the qualified H20 stack.",
+    "not_claimed": [
+      "a new vLLM 0.25.1 model-level latency or throughput result",
+      "a portable Loom PyTorch binary wheel",
+      "compatibility outside vLLM 0.24 and 0.25"
+    ]
+  }
+}

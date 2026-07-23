@@ -1,0 +1,39 @@
+name: Performance regression
+description: Report a regression with a reproducible named baseline.
+title: "[Performance] "
+labels:
+  - performance
+body:
+  - type: textarea
+    id: revisions
+    attributes:
+      label: Good and bad revisions
+      description: Provide commits, releases, or dependency versions that bound the regression.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Hardware and software
+      description: Include GPU, clocks/power policy if changed, driver, CUDA, PyTorch, engine, and model.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Reproduction command
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Raw result summary
+      description: Include correctness, warm-up, iterations, samples, statistic, and provider order.
+    validations:
+      required: true
+  - type: textarea
+    id: artifact
+    attributes:
+      label: JSON artifact or profiler trace
+      description: Link or attach machine-readable evidence when possible.

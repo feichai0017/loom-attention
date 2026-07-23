@@ -36,9 +36,9 @@
   preserving caller-owned sampling policy without a full-vocabulary F32
   logprob tensor;
 - in-place F32/FP16/BF16 Min-P contracts, CPU oracles, handwritten CUDA, C ABI,
-  PyTorch mutation schemas, and an opt-in vLLM 0.24 processor override that
-  cancels the softmax denominator instead of allocating probability and mask
-  tensors;
+  PyTorch mutation schemas, and an opt-in vLLM 0.24/0.25 processor override
+  that cancels the softmax denominator instead of allocating probability and
+  mask tensors;
 - base paged MQA/GQA decode attention for one query per request: Rust contract
   and stable CPU oracle, F32/FP16/BF16 handwritten CUDA/C ABI, safe Rust
   entrypoints, dense-inner NHD cache indirection with explicit outer block
@@ -52,8 +52,9 @@
   PyTorch temporary ownership while preserving the original allocation-free
   C ABI;
 - a C++ PyTorch dispatcher using the current CUDA stream, with Add+RMSNorm and
-  RMSNorm+dynamic-FP8 routed through `loom-cuda-bridge` into borrowed safe Rust
-  dispatch while other operators retain the direct raw-CUDA path;
+  RMSNorm+dynamic-FP8 plus contiguous greedy+sampled-logprob routed through
+  `loom-cuda-bridge` into borrowed safe Rust dispatch; padded greedy rows and
+  other operators retain the direct raw-CUDA path;
 - a source-adapter Python wheel with explicit framework extras, project
   metadata, license/readme payloads, and a CI install/entry-point smoke gate;
 - a `loom_cuda` vLLM IR provider with native fallback and an opt-in vLLM
@@ -61,7 +62,7 @@
   fusion-table replacement, RoPE+KV compiler-pass adapter, and pure-greedy
   general selected-token sampled-logprob fast paths, and a measured-shape
   Min-P override plus a native-cache short-context paged-decode override for
-  vLLM 0.24;
+  vLLM 0.24 and 0.25;
 - per-operator JSON correctness/latency benchmarks and named vLLM baselines.
 
 ## Validated
@@ -93,6 +94,15 @@
   CUDA-feature Clippy and its address-range unit test, rejected short and
   overlapping buffers before launch, and recorded Add+RMSNorm path hits from
   direct PyTorch and vLLM IR plus RMSNorm+FP8 path hits from direct PyTorch;
+- the contiguous greedy+sampled-logprob path now builds and links through the
+  checked Rust bridge on H20, records one Rust path hit for admitted contiguous
+  logits, preserves the padded-row raw-ABI fallback with zero Rust path hits,
+  rejects short/overlapping regions before submission, and passes
+  external-stream, compile, graph, and vLLM adapter tests;
+- official vLLM 0.24.0 and 0.25.1 packages each passed the complete 183-test
+  H20 Python GPU suite on Torch 2.11.0+cu130; the 0.25.1 process loaded its own
+  `vllm/_C_stable_libtorch.abi3.so`, and the focused greedy/vLLM gate passed
+  40 tests;
 - Loom and vLLM's CUDA provider were bitwise identical for BF16 at `1x4096`,
   `8x4096`, `128x4096`, and `8x8192`;
 - through the same vLLM IR dispatch, order-reversed H20 runs measured Loom
@@ -310,5 +320,5 @@ FA3 for the engine's 128-1,024-token path.
 - an FA3-competitive paged-decode kernel at 1,024 tokens and batches above one;
 - integration into SGLang or a Rust-native engine path;
 - larger production-model and serving-workload validation;
-- automated binary-wheel packaging;
+- PyTorch Stable ABI migration or per-PyTorch automated binary-wheel packaging;
 - serving-scale concurrency, goodput, and memory improvement.

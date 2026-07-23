@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a correctness, build, contract, or integration defect.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please separate an incorrect result from an unsupported contract or a performance regression.
+  - type: input
+    id: version
+    attributes:
+      label: Loom version or commit
+      placeholder: v1.0.0-alpha.1 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Rust, CUDA toolkit, driver, GPU, Python, PyTorch, and engine versions.
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Operator contract
+      description: Include shapes, dtypes, strides/layout, stream, aliasing, and the engine call site.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed result
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result or fallback
+    validations:
+      required: true

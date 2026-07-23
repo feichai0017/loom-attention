@@ -5,8 +5,10 @@
   <p>
     <a href="docs/README.md">Documentation</a> ·
     <a href="docs/operator-catalog.md">Operator catalog</a> ·
+    <a href="docs/compatibility.md">Compatibility</a> ·
     <a href="docs/guides/vllm-ir-provider.md">Integration guide</a> ·
     <a href="docs/results/README.md">H20 evidence</a> ·
+    <a href="CONTRIBUTING.md">Contributing</a> ·
     <a href="CHANGELOG.md">Changelog</a> ·
     <a href="https://feichai0017.github.io/loom-kernels/">Website</a>
   </p>
@@ -32,7 +34,7 @@ GEMM libraries.
 | Contract | Dtypes, shapes, layouts, aliasing rules, capability queries, and invalid-input behavior |
 | Reference | Deterministic CPU oracles used before accelerator timing |
 | Execution | Safe Rust dispatch over a small C ABI and handwritten CUDA kernels |
-| Integration | Current-stream PyTorch operators and narrow vLLM 0.24 registration points |
+| Integration | Current-stream PyTorch operators and narrow vLLM 0.24/0.25 registration points |
 | Evidence | Reproducible correctness, named-baseline, CUDA Graph, and engine gates |
 
 Dense GEMM stays with cuBLASLt, CUTLASS, or the engine-selected backend. Loom
@@ -58,7 +60,7 @@ is never a performance claim.
 flowchart LR
     A["Inference engine"] --> N["Native Rust adapter"]
     A --> P["PyTorch / vLLM adapter"]
-    P -- "Add+RMSNorm / RMSNorm→FP8" --> B["Checked Rust FFI bridge"]
+    P -- "Norm / contiguous greedy tail" --> B["Checked Rust FFI bridge"]
     P -- "Other admitted operators" --> C["Raw CUDA C ABI"]
     N --> R["Safe Rust dispatch"]
     B --> R
@@ -71,11 +73,11 @@ flowchart LR
 
 The backend either accepts the exact contract or declines it. Adapters do not
 silently copy, cast, reshape, or change sampling policy to force a Loom path.
-Add+RMSNorm and RMSNorm→dynamic-FP8 are the first framework paths routed
-through `loom-cuda-bridge`: PyTorch passes its existing pointers, element
-counts, and current stream into checked Rust borrowed views before launch.
-Other operators still call the raw CUDA C ABI directly and will migrate only
-after their own correctness and engine gates close.
+Add+RMSNorm, RMSNorm→dynamic-FP8, and contiguous greedy+sampled-logprob calls
+are routed through `loom-cuda-bridge`: PyTorch passes its existing pointers,
+element counts, and current stream into checked Rust borrowed views before
+launch. Padded greedy rows retain the stride-aware raw ABI, and other operators
+will migrate only after their own correctness and engine gates close.
 
 ## Quick start
 
@@ -136,7 +138,8 @@ The first build produces both the raw CUDA library and
 
 See the [Python adapter README](python/README.md) for direct calls and the
 [vLLM integration guide](docs/guides/vllm-ir-provider.md) for every opt-in and
-fallback contract.
+fallback contract. The [compatibility matrix](docs/compatibility.md) separates
+source builds, qualified framework versions, and future binary-wheel work.
 
 ## Evidence, not blanket claims
 
@@ -151,6 +154,7 @@ opens the raw JSON artifact used for the claim.
 | [RoPE + paged-KV write](docs/results/h20-rope-paged-kv-20260722.json) | `2.30–2.40×` dispatcher ratio for 1–512 tokens | Real-engine invocation is proven; end-to-end remains at parity |
 | [Short paged decode](docs/results/h20-vllm-paged-decode-backend-20260722.json) | `1.154–2.374×` across all 24 admitted backend cases | FP16/BF16, Hq/Hkv 32/8, D128, context ≤32; other shapes use FA3 |
 | [Local split-K paged decode](docs/results/h20-paged-decode-split-k-20260722.json) | `1.14–6.22×` versus legacy Loom | Improves the Rust/CUDA backend; FA3 remains the long-context engine fallback |
+| [vLLM 0.24/0.25 compatibility](docs/results/h20-vllm-compatibility-rust-bridge-20260723.json) | 183/183 H20 GPU tests on each official package | Compatibility result only; no 0.25 performance transfer |
 
 > [!NOTE]
 > A fast kernel is not automatically a faster model. Loom records operator,
@@ -180,10 +184,12 @@ opens the raw JSON artifact used for the claim.
 | [Operator-library design](docs/design/operator-library.md) | Understand architecture and admission gates |
 | [Paged-decode design](docs/design/paged-decode-attention.md) | Read cache layouts, split-K semantics, and exclusions |
 | [vLLM provider guide](docs/guides/vllm-ir-provider.md) | Build, configure, validate, and benchmark engine adapters |
+| [Compatibility matrix](docs/compatibility.md) | Check Rust, CUDA, PyTorch, vLLM, and binary distribution boundaries |
 | [Implementation status](docs/status.md) | See what is implemented, validated, and still open |
 | [Evidence index](docs/results/README.md) | Browse accepted, parity, fallback, and rejected experiments |
 | [Roadmap](docs/roadmap.md) | Follow the next operator boundaries and exit criteria |
 | [Changelog](CHANGELOG.md) | Review released surfaces and alpha compatibility boundaries |
+| [Contributing](CONTRIBUTING.md) | Propose and validate an operator or integration change |
 
 ## License
 

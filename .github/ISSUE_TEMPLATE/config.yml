@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://feichai0017.github.io/loom-kernels/
+    about: Read the architecture, operator catalog, compatibility matrix, and evidence first.

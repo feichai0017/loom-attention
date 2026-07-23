@@ -6,7 +6,7 @@ import { repositoryUrl } from "../../data/site";
 
 <SiteLayout
   title="Integration — Loom Kernels"
-  description="Use Loom Kernels through Rust contracts, current-stream PyTorch operators, or narrow vLLM 0.24 routes."
+  description="Use Loom Kernels through Rust contracts, current-stream PyTorch operators, or narrow vLLM 0.24/0.25 routes."
   active="Integration"
 >
   <header class="page-hero">
@@ -56,9 +56,9 @@ CUDA_HOME=/usr/local/cuda-13.1 LOOM_CUDA_ARCHS=90 \
 CUDA_HOME=/usr/local/cuda-13.1 \
   .venv-vllm/bin/python python/build_torch_extension.py</code></pre>
       <p>
-        The first command builds the CUDA C ABI. The second creates the small
-        LibTorch dispatcher shim. Repository checkouts discover both libraries
-        under <code>build/</code>.
+        The first command builds the raw CUDA library and checked Rust bridge.
+        The second creates the small LibTorch dispatcher shim. Repository
+        checkouts discover all three libraries under <code>build/</code>.
       </p>
 
       <h2>Call PyTorch directly</h2>
@@ -78,7 +78,7 @@ token_ids, logprobs, ranks = greedy_sample_logprobs(logits)
 logprobs, ranks = selected_token_logprobs(logits, sampled_ids_i64)
 min_p_filter_(sampling_logits_f32, min_p_f32)</code></pre>
 
-      <h2>vLLM 0.24 opt-ins</h2>
+      <h2>vLLM 0.24/0.25 opt-ins</h2>
       <table class="operator-table">
         <thead>
           <tr><th>Route</th><th>Enable</th></tr>
@@ -103,6 +103,15 @@ min_p_filter_(sampling_logits_f32, min_p_f32)</code></pre>
           the original vLLM path.
         </p>
       </div>
+
+      <h2>Compatibility is explicit</h2>
+      <p>
+        Official vLLM 0.24.0 and 0.25.1 packages each pass the complete 183-test
+        H20 GPU suite. Existing model-level performance artifacts remain tied
+        to the version recorded in each result; compatibility does not transfer
+        a speedup claim. Read the{" "}
+        <a href={`${repositoryUrl}/blob/main/docs/compatibility.md`}>compatibility matrix</a>.
+      </p>
 
       <h2>Read the exact contracts</h2>
       <p>

@@ -1,0 +1,50 @@
+name: Operator proposal
+description: Propose a measured inference boundary before a large implementation.
+title: "[Operator] "
+labels:
+  - enhancement
+body:
+  - type: input
+    id: consumer
+    attributes:
+      label: Engine and call site
+      placeholder: vLLM Sampler.forward, SGLang radix-cache update, Rust engine module
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Tensor and execution contract
+      description: Include dtypes, shapes, layouts, aliasing, allocation ownership, and stream semantics.
+    validations:
+      required: true
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Named baseline
+      description: Identify the exact framework, engine, or vendor path to compare.
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload evidence
+      description: Explain where this boundary is material in a real model or serving profile.
+    validations:
+      required: true
+  - type: textarea
+    id: gates
+    attributes:
+      label: Proposed exit gates
+      description: List correctness, framework, engine, and performance acceptance criteria.
+    validations:
+      required: true
+  - type: checkboxes
+    id: ownership
+    attributes:
+      label: Scope
+      options:
+        - label: I have identified who owns fallback behavior.
+          required: true
+        - label: I am not treating an isolated microbenchmark as an engine speedup.
+          required: true

@@ -20,6 +20,12 @@ otherwise.
 | Engine | A real framework/engine invokes Loom and preserves outputs |
 | Serving | TTFT, TPOT, throughput, memory, or goodput improves under load |
 
+## Compatibility
+
+| Boundary | Result set | Current conclusion |
+| --- | --- | --- |
+| vLLM minor release and Rust greedy bridge | [0.24/0.25 H20 gate](h20-vllm-compatibility-rust-bridge-20260723.json) | Official 0.24.0 and 0.25.1 packages each pass 183 GPU tests; contiguous greedy reaches checked Rust while padded rows retain the raw ABI fallback. This is not a new 0.25 performance claim. |
+
 ## Normalization and activation
 
 | Boundary | Result set | Current conclusion |

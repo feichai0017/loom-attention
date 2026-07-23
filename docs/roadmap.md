@@ -28,9 +28,9 @@ an oracle-checked CUDA path without cloning the repository.
 
 ## K0.6: Engine-Owned Runtime Interop
 
-Status: complete for the Add+RMSNorm and RMSNorm+dynamic-FP8 normalization
-vertical slices after `v1.0.0-alpha.1`; migration of other operators remains
-incremental.
+Status: complete for Add+RMSNorm, RMSNorm+dynamic-FP8, and contiguous
+greedy+sampled-logprob vertical slices after `v1.0.0-alpha.1`; migration of
+other operators remains incremental.
 
 - ~~generic safe backend over owned or borrowed CUDA streams~~;
 - ~~sealed read/write device-memory traits shared by owned buffers and borrowed
@@ -45,10 +45,34 @@ incremental.
   fallback behavior through that Rust-owned path~~ — the H20 gate covers all
   three dtypes, odd widths, `torch.compile`, CUDA Graph replay, Add+RMSNorm
   vLLM IR invocation, and Rust-side invalid-buffer rejection for both paths.
+- ~~move one proven decode-tail engine path through checked Rust~~ — contiguous
+  greedy+sampled-logprob now uses typed borrowed Rust views, exact buffer
+  lengths, disjoint-output validation, and the framework current stream;
+  padded vocabulary rows preserve the existing stride-aware raw ABI fallback.
 
 Exit: an inference-engine call reaches checked Rust dispatch using its existing
 tensor memory and CUDA stream, with no hidden copy, allocation, or ownership
 transfer.
+
+## K0.7: Framework Compatibility And Binary Distribution
+
+Status: in progress.
+
+- ~~qualify the next vLLM minor without weakening adapter gates~~ — official
+  vLLM 0.24.0 and 0.25.1 packages each pass the complete 183-test H20 GPU suite;
+- ~~centralize runtime version admission and package metadata~~ — supported
+  range is `vllm>=0.24,<0.26`, with registration-time series checks;
+- ~~document the current binary boundary and Stable ABI decision~~ — the
+  Python artifact remains a source adapter, and the current ATen/LibTorch
+  dispatcher is explicitly not advertised as ABI-stable;
+- prototype Add+RMSNorm with PyTorch's Stable ABI while retaining the existing
+  dispatcher as the reference path;
+- validate one binary across two PyTorch minor releases, then automate
+  CUDA/PyTorch/Python matrix wheels and clean-install smoke tests.
+
+Exit: a published binary artifact installs without a repository checkout,
+uses a declared PyTorch ABI boundary, and passes the same framework and H20
+gates as the source build.
 
 ## K1: Useful Normalization Family
 
@@ -102,17 +126,18 @@ Exit: fewer HBM passes and lower TPOT in a real engine.
 Status: in progress.
 
 - ~~greedy argmax plus sampled-token raw logprob~~ — Rust oracle, safe
-  CUDA/C ABI, PyTorch, and narrow vLLM 0.24 integration complete; H20 named
-  baseline and both real-engine provider orders show exact token/rank parity
-  and material latency/TPOT benefit;
+  CUDA/C ABI, PyTorch, checked-Rust contiguous dispatch, and narrow vLLM
+  0.24/0.25 integration complete; the vLLM 0.24 H20 named baseline and both
+  real-engine provider orders show exact token/rank parity and material
+  latency/TPOT benefit;
 - ~~general selected-token raw logprob and rank~~ — vLLM continues to own
   penalties, top-k/top-p, RNG, and token selection; Rust/CUDA/PyTorch plus
   order-reversed Qwen2.5 H20 gates show exact token/rank parity and material
   operator and end-to-end benefit;
-- ~~in-place min-p filtering~~ — Rust/CUDA/PyTorch and a vLLM 0.24 opt-in are
-  complete; H20 evidence selects Loom only for at least 32 rows and a 65,536+
-  vocabulary, while smaller shapes fall back because the one-block-per-row
-  kernel is slower there;
+- ~~in-place min-p filtering~~ — Rust/CUDA/PyTorch and a vLLM 0.24/0.25 opt-in
+  are complete; H20 evidence selects Loom only for at least 32 rows and a
+  65,536+ vocabulary, while smaller shapes fall back because the
+  one-block-per-row kernel is slower there;
 - fused logits bias, masking, bad-word suppression, and history penalties;
 - top-k/top-p filtering, renormalization, and deterministic RNG sampling;
 - top-k logprobs.
@@ -146,9 +171,10 @@ Status: in progress.
 - ~~native vLLM cache layout and broad short-context qualification~~ — the C
   ABI accepts interleaved K/V block strides; a 156-case shape sweep and focused
   132-case batch sweep identify the exact winning envelope;
-- ~~measured-shape vLLM 0.24 adapter with explicit FA3 fallback~~ — the opt-in
-  route is limited to FP16/BF16 Hq/Hkv 32/8, D128, block 16/32, batch <=128,
-  context <=32; direct backend and stable-output synthetic-engine gates pass;
+- ~~measured-shape vLLM 0.24/0.25 adapter with explicit FA3 fallback~~ — the
+  opt-in route is limited to FP16/BF16 Hq/Hkv 32/8, D128, block 16/32,
+  batch <=128, context <=32; 0.25 compatibility and the 0.24 direct-backend
+  and stable-output synthetic-engine gates pass;
 - pretrained-model gate and broader head geometry — the first Qwen2.5 `14/2`,
   D64 attempt hit the engine but failed exact-token and latency gates, so it
   remains intentionally unrouted;

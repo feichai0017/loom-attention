@@ -1,31 +1,32 @@
 # vLLM IR Provider
 
-Loom Kernels can replace vLLM 0.24's fused residual Add+RMSNorm implementation
-through the vLLM IR provider registry. The integration is inference-only,
-mutates both tensors in place, launches on PyTorch's current CUDA stream, and
-survives vLLM compilation and CUDA Graph capture.
+Loom Kernels can replace fused residual Add+RMSNorm implementations in vLLM
+0.24 and 0.25 through the vLLM IR provider registry. The integration is
+inference-only, mutates both tensors in place, launches on PyTorch's current
+CUDA stream, and survives vLLM compilation and CUDA Graph capture.
 
 The same package also provides an opt-in out-of-tree replacement for vLLM's
 standard `SiluAndMul` layer. It is not enabled merely by installing the plugin:
 the current H20 result establishes exact compatibility and graph parity, not a
 performance win.
 
-A second opt-in replaces vLLM 0.24's fused SiLU-and-Mul plus dynamic symmetric
+A second opt-in replaces vLLM's fused SiLU-and-Mul plus dynamic symmetric
 per-block FP8 implementations for group sizes 64 and 128. This boundary is
 bitwise compatible with vLLM's fused operator and has an operator-level H20
 advantage. It has also completed a pinned Qwen2.5 online-FP8 engine gate with
 direct compiler-match and launch evidence; that small-model end-to-end result
 is at parity rather than a demonstrated speedup.
 
-A third opt-in uses vLLM 0.24's existing RoPE+KV compiler fusion pass with
-Loom's CUDA implementation for FlashAttention and FlashInfer native caches.
+A third opt-in uses the existing RoPE+KV compiler fusion pass in vLLM 0.24 and
+0.25 with Loom's CUDA implementation for FlashAttention and FlashInfer native
+caches.
 It preserves packed-QKV token/head strides, NHD or HND cache strides, negative
 slots, and the shorter slot mapping used with padded engine inputs. Quantized
 KV caches are deliberately declined.
 
-A fourth explicit registration replaces only vLLM 0.24's pure-greedy
-`logprobs=0` sampler tail. It fuses argmax, sampled-token raw logprob, and
-tie-aware rank without materializing a full-vocabulary F32 logprob tensor.
+A fourth explicit registration replaces only the pure-greedy `logprobs=0`
+sampler tail in vLLM 0.24 and 0.25. It fuses argmax, sampled-token raw logprob,
+and tie-aware rank without materializing a full-vocabulary F32 logprob tensor.
 Unlike the parity-only integrations above, pinned Qwen2.5-0.5B H20 runs show
 an order-stable end-to-end latency and TPOT improvement for this narrow
 request contract.
@@ -36,7 +37,7 @@ and RNG, while Loom computes only the chosen token's raw logprob and rank from
 the preserved BF16/FP16 logits. Pinned top-k/top-p H20 runs show exact tokens
 and ranks plus an order-stable end-to-end improvement.
 
-A sixth opt-in replaces only a measured short-context slice of vLLM 0.24's
+A sixth opt-in replaces only a measured short-context slice of vLLM's
 FlashAttention decode method. Loom reads vLLM's interleaved native KV cache
 directly and routes every unsupported shape or semantic feature to the
 original FA3 method.
@@ -47,6 +48,15 @@ The registered contract is:
 residual = input + residual
 input = RMSNorm(residual, weight, epsilon)
 ```
+
+## Compatibility
+
+The supported package interval is `vllm>=0.24,<0.26`. Official vLLM 0.24.0 and
+0.25.1 packages each pass the complete 183-test H20 GPU suite with the current
+adapter. The existing model-level performance artifacts were captured on
+0.24.0 and are not automatically performance claims for 0.25.1. See the
+[compatibility matrix](../compatibility.md) and
+[0.25.1 gate](../results/h20-vllm-compatibility-rust-bridge-20260723.json).
 
 ## Build
 
@@ -67,10 +77,11 @@ The first command builds `build/libloom_kernels_cuda.so` and the checked
 `build/libloom_cuda_bridge.so` from the same CUDA sources used by the Rust
 backend. The second builds a small C++ dispatcher shim at
 `build/libloom_kernels_torch.so`; this avoids Python/ctypes overhead on the
-vLLM hot path. Add+RMSNorm and RMSNorm+dynamic-FP8 enter safe Rust borrowed
-dispatch through the checked bridge, while the other operator families
-currently retain the raw C ABI. Repository checkouts discover the files
-automatically. A packaged deployment can set `LOOM_KERNELS_CUDA_LIBRARY` and
+vLLM hot path. Add+RMSNorm, RMSNorm+dynamic-FP8, and contiguous
+greedy+sampled-logprob enter safe Rust borrowed dispatch through the checked
+bridge. Padded greedy rows and the other operator families retain the raw C
+ABI. Repository checkouts discover the files automatically. A packaged
+deployment can set `LOOM_KERNELS_CUDA_LIBRARY` and
 `LOOM_KERNELS_TORCH_LIBRARY` to absolute library paths and must keep
 `libloom_cuda_bridge.so` next to the dispatcher library or in its parent
 directory.
@@ -185,10 +196,11 @@ Embedding code can call
 `loom_kernels.vllm.register_vllm_silu_and_mul_dynamic_fp8()` explicitly. The
 replacement uses vLLM's mutable custom-op schema, including an optional F32
 scale upper bound and row-major or transposed scale storage. Registration is
-intentionally version-specific to vLLM 0.24's activation-quant compiler pass;
+intentionally version-specific to the vLLM 0.24/0.25 activation-quant compiler
+pass;
 unsupported versions should leave the opt-in unset.
 
-To enable fused RoPE+paged-KV on vLLM 0.24 CUDA, configure the compilation
+To enable fused RoPE+paged-KV on vLLM 0.24/0.25 CUDA, configure the compilation
 object before constructing the engine:
 
 ```python
@@ -205,7 +217,7 @@ The helper explicitly enables `+rotary_embedding`, keeps the cache update in
 the compiled graph, registers Loom on the FlashAttention/FlashInfer backend
 classes, and enables fusion only through 256 tokens by default. The threshold
 is intentional: the H20 advantage is largest for decode-sized batches and
-narrows as long prefill becomes compute-bound. The adapter targets vLLM 0.24's
+narrows as long prefill becomes compute-bound. The adapter targets vLLM's
 version-specific compiler contract and native F32/FP16/BF16 cache dtype.
 
 To enable the measured paged-decode route, opt in before vLLM constructs the
@@ -241,7 +253,9 @@ allowed-token mask, bad words, per-request logprob token IDs, thinking-budget
 state, or active argmax-changing logits processor. F32/FP16/BF16 logits may
 have padded rows but require unit vocabulary stride. Every unsupported case
 runs the original vLLM sampler; speculative bonus-token sampling is also
-declined. Registration is version-gated to vLLM 0.24.
+declined. Registration is version-gated to vLLM 0.24/0.25. Contiguous logits
+enter the checked Rust bridge; padded row strides preserve the existing raw
+CUDA ABI.
 
 To preserve vLLM's full sampling policy but avoid its full-vocabulary raw
 log-softmax output, use the general registration instead:
@@ -256,8 +270,8 @@ engine = LLM(model="/path/to/model")
 
 This registration includes the narrower greedy registration, so pure-greedy
 batches keep the fused argmax path. Non-greedy and mixed batches qualify when
-vLLM 0.24 requests raw `logprobs=0` from BF16/FP16 logits and does not request
-specific-token or top-k logprob lists. vLLM executes its original F32
+vLLM 0.24/0.25 requests raw `logprobs=0` from BF16/FP16 logits and does not
+request specific-token or top-k logprob lists. vLLM executes its original F32
 processors and sampler first; Loom then scans the preserved raw logits for the
 selected int64 IDs. F32 logits and processed-logprob modes conservatively fall
 back because vLLM may mutate their storage in place.
@@ -520,7 +534,7 @@ dispatcher bridge follows PyTorch's
 - inference-only mutation, with no autograd implementation;
 - one selectable IR provider (`fused_add_rms_norm`), one opt-in out-of-tree
   layer replacement (`SiluAndMul`), and one vLLM-version-specific
-  activation-quant fusion-table replacement, plus a vLLM 0.24-specific
+  activation-quant fusion-table replacement, plus a vLLM 0.24/0.25-specific
   RoPE+native-KV compiler-pass adapter, greedy/general selected-token
   sampled-logprob sampler overrides, a shape-gated Min-P override, and a
   measured-shape FlashAttention paged-decode override;

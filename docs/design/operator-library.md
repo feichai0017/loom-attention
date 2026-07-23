@@ -42,18 +42,20 @@ boundary is crossed, ordinary callers cannot invent alternative trait
 implementations or pass read-only storage as a mutable output. Kernel launches
 remain asynchronous.
 
-The pure-Rust H20 smoke test exercises this zero-copy path. Add+RMSNorm and
-RMSNorm+FP8 also close real framework gates: the C++ PyTorch dispatcher passes
-tensor pointers, actual element counts, and PyTorch's current stream through
-`loom-cuda-bridge`, which constructs borrowed Rust views and calls the same
-safe `CudaBackend` methods. The bridge validates lengths, alignment, address
-overflow, and non-overlap, contains Rust panics behind a status ABI, and keeps
-a thread-local detailed error. It does not allocate, copy, synchronize, free,
-or destroy framework resources.
+The pure-Rust H20 smoke test exercises this zero-copy path. Add+RMSNorm,
+RMSNorm+FP8, and contiguous greedy+sampled-logprob calls also close real
+framework gates: the C++ PyTorch dispatcher passes tensor pointers, actual
+element counts, and PyTorch's current stream through `loom-cuda-bridge`, which
+constructs borrowed Rust views and calls the same safe `CudaBackend` methods.
+The bridge validates lengths, alignment, address overflow, and non-overlap,
+contains Rust panics behind a status ABI, and keeps a thread-local detailed
+error. It does not allocate, copy, synchronize, free, or destroy framework
+resources.
 
-This is deliberately an operator-by-operator migration. Activation, RoPE/KV,
-sampling, Min-P, and paged-decode framework paths still call the raw CUDA C ABI
-directly.
+This is deliberately an operator-by-operator migration. Greedy logits with a
+padded row stride continue through the existing stride-aware raw ABI.
+Activation, RoPE/KV, selected-token logprobs, Min-P, and paged-decode framework
+paths also still call the raw CUDA C ABI directly.
 
 ## Add+RMSNorm Contract
 
@@ -157,7 +159,7 @@ The decode-tail operator consumes finite rank-2 F32, FP16, or BF16 logits with
 a unit vocabulary stride and an explicit, possibly padded row stride. For each
 row it returns the lowest token index attaining the maximum, that token's F32
 raw log-softmax value, and an `int64` sampled-token rank. The rank deliberately
-matches vLLM 0.24: it counts values greater than or equal to the selected
+matches vLLM 0.24/0.25: it counts values greater than or equal to the selected
 value, so tied maximum logits produce a rank greater than one.
 
 One CUDA block performs first-index argmax, online logsumexp, and maximum-tie
@@ -167,7 +169,8 @@ rank work. Launches follow the caller's current stream; token IDs, logprobs,
 and ranks are separately allocated outputs.
 
 The vLLM adapter is intentionally narrower than the CUDA primitive. It only
-intercepts vLLM 0.24 requests where every row is greedy, `max_num_logprobs` is
+intercepts vLLM 0.24/0.25 requests where every row is greedy,
+`max_num_logprobs` is
 zero, raw logprobs are requested, and masks, penalties, bad words, thinking
 state, and argmax-changing processors are inactive. Other requests execute
 vLLM's original sampler unchanged.
@@ -178,7 +181,7 @@ tie-aware int64 rank. One CUDA block loads the selected raw logit, computes an
 online logsumexp over the row, and counts logits greater than or equal to the
 selected value. It never materializes `[rows, vocab_size]` F32 logprobs.
 
-Its vLLM 0.24 adapter deliberately does not own sampling policy. vLLM still
+Its vLLM 0.24/0.25 adapter deliberately does not own sampling policy. vLLM still
 converts logits to F32, applies masks/processors/penalties and temperature,
 runs greedy or random top-k/top-p selection, and consumes RNG in its original
 order. Loom runs afterward against the preserved BF16/FP16 raw logits only for

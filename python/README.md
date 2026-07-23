@@ -1,7 +1,7 @@
 # Loom Kernels · Python adapters
 
-Current-stream PyTorch operators and narrow, opt-in vLLM 0.24 integration for
-[Loom Kernels](https://github.com/feichai0017/loom-kernels).
+Current-stream PyTorch operators and narrow, opt-in vLLM 0.24/0.25 integration
+for [Loom Kernels](https://github.com/feichai0017/loom-kernels).
 
 [Project README](../README.md) · [Integration guide](../docs/guides/vllm-ir-provider.md) · [Operator catalog](../docs/operator-catalog.md)
 
@@ -38,9 +38,10 @@ export LOOM_KERNELS_TORCH_LIBRARY=/path/to/libloom_kernels_torch.so
 
 `build_native.py` also builds `libloom_cuda_bridge.so`. Keep that library next
 to `libloom_kernels_torch.so` (or in its parent directory) so the dispatcher's
-relative runtime search path can load it. Add+RMSNorm and RMSNorm+dynamic-FP8
-use this checked Rust path; the remaining operator families currently use the
-raw CUDA library.
+relative runtime search path can load it. Add+RMSNorm, RMSNorm+dynamic-FP8,
+and contiguous greedy+sampled-logprob calls use this checked Rust path.
+Stride-padded greedy rows and the remaining operator families currently use
+the raw CUDA library.
 
 Automated binary wheels are not published yet.
 
@@ -99,5 +100,7 @@ Every route checks its exact dtype, shape, layout, and semantic contract. An
 unsupported request runs the original vLLM path instead of being copied,
 cast, or reshaped into eligibility.
 
-The full compatibility matrix, build details, and validation commands live in
-the [vLLM provider guide](../docs/guides/vllm-ir-provider.md).
+The [compatibility matrix](../docs/compatibility.md) records the qualified
+PyTorch/vLLM versions and binary distribution boundary. Build details and
+validation commands live in the
+[vLLM provider guide](../docs/guides/vllm-ir-provider.md).

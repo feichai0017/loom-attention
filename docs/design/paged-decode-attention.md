@@ -14,7 +14,7 @@ the current token's K/V values, and submits one query token per active request.
 - sequence lengths: `[sequences]`, including the current cached token;
 - output: `[sequences, query_heads, value_head_size]`.
 
-This matches the logical NHD cache consumed by vLLM 0.24. The inner
+This matches the logical NHD cache consumed by vLLM 0.24/0.25. The inner
 `[block_size, kv_heads, head_size]` dimensions must be dense, while the outer
 block stride is explicit. Consequently, both separate K/V allocations and the
 two noncontiguous views of vLLM's physical
@@ -108,7 +108,7 @@ path.
 
 ## Qualified vLLM Route
 
-The vLLM 0.24 adapter is opt-in with
+The vLLM 0.24/0.25 adapter is opt-in with
 `LOOM_KERNELS_ENABLE_PAGED_DECODE_ATTENTION=1` or explicit
 `register_vllm_paged_decode_attention()`. It replaces
 `FlashAttentionImpl.forward` only for the measured envelope:
@@ -131,7 +131,7 @@ integration, not a new global attention backend.
 2. a PyTorch reference cross-check over randomized block tables and lengths;
 3. short-context one-pass CUDA and long-context split-K/LSE candidates;
 4. current-stream PyTorch schema, FakeTensor, compile, and CUDA Graph gates;
-5. vLLM 0.24 FlashAttention logical-layout adapter with explicit fallback;
+5. vLLM 0.24/0.25 FlashAttention logical-layout adapter with explicit fallback;
 6. H20 comparison against the engine-selected FA3/FlashInfer implementation;
 7. real-model TPOT, throughput, and KV-memory evidence.
 
@@ -141,8 +141,8 @@ groups, odd head sizes, distinct value widths, F32/FP16/BF16, external
 streams, FakeTensor/schema, `torch.compile`, CUDA Graph replay,
 vLLM-interleaved cache strides, caller-owned split-K workspace, stable LSE
 merge, and launch telemetry. On NVIDIA H20 all 46 focused paged-decode tests,
-the 34-test paged-decode/vLLM gate, the six safe Rust CUDA tests, and the
-177-test Python suite pass.
+the 34-test paged-decode/vLLM gate, the safe Rust CUDA tests, and the
+183-test Python suite pass.
 
 The native-interleaved 156-case shape sweep establishes why the route is
 narrow: 82 cases beat FA3 and 74 lose. A focused 132-case Hq/Hkv `32/8`

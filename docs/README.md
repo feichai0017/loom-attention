@@ -3,7 +3,7 @@
 A guided map of the Rust contracts, CUDA backend, framework integrations, and
 the evidence used to qualify them.
 
-[Project overview](../README.md) · [Website](https://feichai0017.github.io/loom-kernels/) · [Operator catalog](operator-catalog.md) · [Evidence index](results/README.md)
+[Project overview](../README.md) · [Website](https://feichai0017.github.io/loom-kernels/) · [Operator catalog](operator-catalog.md) · [Compatibility](compatibility.md) · [Evidence index](results/README.md)
 
 ---
 
@@ -14,6 +14,7 @@ the evidence used to qualify them.
 | Understand the project | [Operator-library design](design/operator-library.md) | [Operator catalog](operator-catalog.md) |
 | Use Rust or CUDA | [Project quick start](../README.md#quick-start) | [Implementation status](status.md) |
 | Integrate PyTorch or vLLM | [Python adapter README](../python/README.md) | [vLLM provider guide](guides/vllm-ir-provider.md) |
+| Check supported versions | [Compatibility matrix](compatibility.md) | [Implementation status](status.md) |
 | Work on paged decode | [Paged-decode design](design/paged-decode-attention.md) | [Paged-decode evidence](results/README.md#paged-decode-attention) |
 | Evaluate performance | [Evidence index](results/README.md) | Raw JSON under [`results/`](results/) |
 | Pick the next operator | [Roadmap](roadmap.md) | [Catalog implementation order](operator-catalog.md#implementation-order) |
@@ -28,14 +29,18 @@ the evidence used to qualify them.
   surface with explicit status and priority.
 - [Implementation status](status.md) separates implemented code, validation,
   and unresolved work.
+- [Compatibility matrix](compatibility.md) separates qualified source,
+  framework, GPU, and binary distribution boundaries.
 - [Roadmap](roadmap.md) orders work by engine value rather than operator count.
+- [Contributing guide](../CONTRIBUTING.md) defines proposal and acceptance
+  requirements for new operators.
 
 ### Integration
 
 - [Python adapter README](../python/README.md) covers installation, native
   library discovery, and direct PyTorch use.
 - [vLLM provider guide](guides/vllm-ir-provider.md) contains the complete vLLM
-  0.24 build, opt-in, fallback, test, and benchmark contracts.
+  0.24/0.25 build, opt-in, fallback, test, and benchmark contracts.
 - [Paged-decode design](design/paged-decode-attention.md) documents native KV
   layouts, GQA packing, local split-K/LSE, and routing exclusions.
 

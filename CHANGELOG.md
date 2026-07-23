@@ -13,6 +13,11 @@ spelling; Python source-adapter metadata uses the equivalent PEP 440 spelling.
 - Add+RMSNorm PyTorch/vLLM and RMSNorm+dynamic-FP8 PyTorch vertical slices
   through that bridge, with independent launch telemetry, external-stream,
   `torch.compile`, CUDA Graph, and invalid-buffer gates on NVIDIA H20.
+- contiguous greedy selection plus sampled-token logprob/rank through the
+  checked Rust bridge, while preserving the raw stride-aware ABI for padded
+  vocabulary rows;
+- vLLM 0.25 support, an explicit compatibility matrix, H20 0.24/0.25 GPU-suite
+  evidence, contribution guidance, and structured issue forms.
 
 ### Fixed
 
