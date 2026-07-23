@@ -24,7 +24,8 @@ otherwise.
 
 | Boundary | Result set | Current conclusion |
 | --- | --- | --- |
-| vLLM minor release and Rust greedy bridge | [0.24/0.25 H20 gate](h20-vllm-compatibility-rust-bridge-20260723.json) | Official 0.24.0 and 0.25.1 packages each pass 183 GPU tests; contiguous greedy reaches checked Rust while padded rows retain the raw ABI fallback. This is not a new 0.25 performance claim. |
+| Single Rust bridge and vLLM minor releases | [breaking-change H20 gate](h20-single-rust-bridge-compatibility-20260723.json) | All ten framework operator families use the Rust-owned path; 0.24.0 and 0.25.1 each pass 191 GPU tests; the torch shim consumes no raw CUDA launch symbols. This is not a new 0.25 performance claim. |
+| Historical partial-bridge baseline | [pre-unification 0.24/0.25 gate](h20-vllm-compatibility-rust-bridge-20260723.json) | Preserved as historical evidence for revision `3ae4210`; its raw-ABI routing description does not apply to the current architecture. |
 
 ## Normalization and activation
 

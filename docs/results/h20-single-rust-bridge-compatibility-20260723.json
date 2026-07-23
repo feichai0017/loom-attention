@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-23",
+  "purpose": "single Rust bridge breaking-change and vLLM compatibility gate",
+  "tested_revision": "cb5feaf338198eb07b6755509814e1f4b6ef1faa",
+  "hardware": {
+    "gpu": "NVIDIA H20",
+    "compute_capability": "sm_90",
+    "driver": "535.161.08"
+  },
+  "toolchain": {
+    "cuda": "13.1 (compiler build 37061995)",
+    "torch": "2.11.0+cu130",
+    "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "python": "3.11.2"
+  },
+  "architecture": {
+    "framework_path": "PyTorch/vLLM -> C++ dispatcher -> versioned Rust bridge -> safe borrowed Rust dispatch -> internal CUDA launch ABI -> handwritten CUDA",
+    "bridge_abi_version": 1,
+    "semantic_operators": [
+      "rms_norm",
+      "add_rms_norm",
+      "rms_norm_dynamic_fp8",
+      "silu_and_mul",
+      "silu_and_mul_dynamic_fp8",
+      "rope_paged_kv_write",
+      "greedy_sample_logprobs",
+      "selected_token_logprobs",
+      "min_p_filter",
+      "paged_decode_attention"
+    ],
+    "removed_interfaces": [
+      "python ctypes backend",
+      "unchecked PyTorch schemas",
+      "direct C++ to raw CUDA launch path",
+      "separate libloom_kernels_cuda.so build",
+      "per-operator telemetry functions"
+    ],
+    "dynamic_symbol_audit": {
+      "bridge_defined_symbols": 15,
+      "raw_cuda_launch_symbols_exported_by_bridge": 0,
+      "bridge_symbols_required_by_torch_shim": 15,
+      "raw_cuda_launch_symbols_required_by_torch_shim": 0
+    }
+  },
+  "vllm_matrix": [
+    {
+      "version": "0.24.0",
+      "package": "isolated installed package",
+      "python_gpu_suite": {
+        "passed": 191,
+        "failed": 0,
+        "duration_seconds": 8.28
+      }
+    },
+    {
+      "version": "0.25.1",
+      "package": "installed official cp38-abi3 wheel payload",
+      "dependency_note": "Torch and non-vLLM dependencies were reused from the qualified CUDA environment; the imported vLLM package came from the isolated 0.25.1 installation.",
+      "python_gpu_suite": {
+        "passed": 191,
+        "failed": 0,
+        "duration_seconds": 8.10
+      }
+    }
+  ],
+  "focused_gates": {
+    "rope_paged_kv": {
+      "passed": 14,
+      "failed": 0,
+      "duration_seconds": 3.08,
+      "coverage": "separate and packed QKV, packed NHD/HND K/V caches, external stream, and logical-alias validation"
+    },
+    "removed_schema_guards": {
+      "cases": 7,
+      "result": "all removed compatibility schemas were absent"
+    }
+  },
+  "rust_cuda_gate": {
+    "cuda_feature_clippy": "passed with -D warnings",
+    "loom_cuda_bridge_tests": {
+      "passed": 3,
+      "failed": 0
+    },
+    "loom_cuda_safe_wrapper_tests": {
+      "passed": 7,
+      "failed": 0
+    }
+  },
+  "commands": [
+    "CUDA_HOME=/usr/local/cuda-13.1 LOOM_CUDA_ARCHS=90 cargo clippy -p loom-cuda-bridge --features cuda --all-targets -- -D warnings",
+    "CUDA_HOME=/usr/local/cuda-13.1 LOOM_CUDA_ARCHS=90 cargo test -p loom-cuda-bridge --features cuda --release",
+    "CUDA_HOME=/usr/local/cuda-13.1 LOOM_CUDA_ARCHS=90 cargo test -p loom-cuda --features cuda --release",
+    "PYTHONPATH=python/src LOOM_KERNELS_TORCH_LIBRARY=build/libloom_kernels_torch.so python -m pytest -q python/tests",
+    "PYTHONPATH=python/src:<vllm-0.25.1-site-packages> LOOM_KERNELS_TORCH_LIBRARY=build/libloom_kernels_torch.so python -m pytest -q python/tests",
+    "nm -D --defined-only build/libloom_cuda_bridge.so",
+    "nm -D --undefined-only build/libloom_kernels_torch.so"
+  ],
+  "decision": {
+    "accepted": true,
+    "vllm_supported_range": ">=0.24,<0.26",
+    "claim": "All ten framework operator families use the single Rust-owned bridge path, and the complete GPU suite passes with vLLM 0.24.0 and 0.25.1 on the qualified H20 stack.",
+    "not_claimed": [
+      "a new model-level latency or throughput result",
+      "a portable PyTorch binary wheel",
+      "compatibility outside vLLM 0.24 and 0.25"
+    ]
+  }
+}

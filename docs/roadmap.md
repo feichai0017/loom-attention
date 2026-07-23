@@ -62,7 +62,7 @@ transfer.
 Status: in progress.
 
 - ~~qualify the next vLLM minor without weakening adapter gates~~ — official
-  vLLM 0.24.0 and 0.25.1 packages each pass the complete 183-test H20 GPU suite;
+  vLLM 0.24.0 and 0.25.1 packages each pass the complete 191-test H20 GPU suite;
 - ~~centralize runtime version admission and package metadata~~ — supported
   range is `vllm>=0.24,<0.26`, with registration-time series checks;
 - ~~document the current binary boundary and Stable ABI decision~~ — the

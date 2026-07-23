@@ -156,7 +156,7 @@ opens the raw JSON artifact used for the claim.
 | [RoPE + paged-KV write](docs/results/h20-rope-paged-kv-20260722.json) | `2.30–2.40×` dispatcher ratio for 1–512 tokens | Real-engine invocation is proven; end-to-end remains at parity |
 | [Short paged decode](docs/results/h20-vllm-paged-decode-backend-20260722.json) | `1.154–2.374×` across all 24 admitted backend cases | FP16/BF16, Hq/Hkv 32/8, D128, context ≤32; other shapes use FA3 |
 | [Local split-K paged decode](docs/results/h20-paged-decode-split-k-20260722.json) | `1.14–6.22×` versus legacy Loom | Improves the Rust/CUDA backend; FA3 remains the long-context engine fallback |
-| [vLLM 0.24/0.25 compatibility](docs/results/h20-vllm-compatibility-rust-bridge-20260723.json) | 183/183 H20 GPU tests on each official package | Compatibility result only; no 0.25 performance transfer |
+| [Single Rust bridge + vLLM 0.24/0.25](docs/results/h20-single-rust-bridge-compatibility-20260723.json) | 191/191 H20 GPU tests on each package; zero raw launch symbols consumed by the shim | Architecture and compatibility result only; no 0.25 performance transfer |
 
 > [!NOTE]
 > A fast kernel is not automatically a faster model. Loom records operator,

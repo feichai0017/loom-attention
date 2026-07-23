@@ -97,7 +97,7 @@
   for both contiguous and padded row-strided logits, rejects short/overlapping
   regions before submission, and passes external-stream, compile, graph, and
   vLLM adapter tests;
-- official vLLM 0.24.0 and 0.25.1 packages each passed the complete 183-test
+- official vLLM 0.24.0 and 0.25.1 packages each passed the complete 191-test
   H20 Python GPU suite on Torch 2.11.0+cu130; the 0.25.1 process loaded its own
   `vllm/_C_stable_libtorch.abi3.so`, and the focused greedy/vLLM gate passed
   40 tests;
@@ -190,9 +190,12 @@
 - selected-token PyTorch tests cover arbitrary IDs/ranks, F32/FP16/BF16,
   Qwen's 151,936-token vocabulary, ties, padded rows, external streams,
   FakeTensor/schema validation, `torch.compile`, and CUDA Graph replay;
-- the current complete H20 Python suite passes 181 tests; the Rust core passes
+- the current complete H20 Python suite passes 191 tests; the Rust core passes
   30 contract/oracle tests, and the CUDA-feature workspace passes formatting,
-  Clippy, release build, plus six safe-wrapper CPU-oracle tests;
+  Clippy, release build, plus seven safe-wrapper CPU-oracle tests;
+- the final shared-library audit exposes 15 versioned bridge symbols and no
+  raw CUDA launch symbols; the PyTorch shim depends on those same 15 bridge
+  symbols and no raw launch symbol;
 - against vLLM's exact `compute_logprobs + gather_logprobs(0)` path for the
   same caller-selected BF16 IDs, ranks were exact and maximum logprob error was
   `9.54e-7`; 1-128 row H20 speedup ratios were `2.77-3.78x`;

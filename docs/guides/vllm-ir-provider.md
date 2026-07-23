@@ -52,11 +52,11 @@ input = RMSNorm(residual, weight, epsilon)
 ## Compatibility
 
 The supported package interval is `vllm>=0.24,<0.26`. Official vLLM 0.24.0 and
-0.25.1 packages each pass the complete 183-test H20 GPU suite with the current
+0.25.1 packages each pass the complete 191-test H20 GPU suite with the current
 adapter. The existing model-level performance artifacts were captured on
 0.24.0 and are not automatically performance claims for 0.25.1. See the
 [compatibility matrix](../compatibility.md) and
-[0.25.1 gate](../results/h20-vllm-compatibility-rust-bridge-20260723.json).
+[single-bridge gate](../results/h20-single-rust-bridge-compatibility-20260723.json).
 
 ## Build
 

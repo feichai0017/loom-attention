@@ -9,9 +9,9 @@ binary portability. A green row below applies only to the stated boundary.
 | --- | --- | --- | --- |
 | Rust | current stable toolchain | format, Clippy, tests, release checks, source crate archives | GitHub CI |
 | CUDA | 13.1, `sm_90` | `loom-cuda`, `loom-cuda-sys`, and `loom-cuda-bridge` build and execute | NVIDIA H20 gate |
-| PyTorch | 2.11.0+cu130 | source-built dispatcher, current stream, `torch.compile`, FakeTensor/opcheck, CUDA Graph replay | 183-test H20 suite |
+| PyTorch | 2.11.0+cu130 | source-built dispatcher, current stream, `torch.compile`, FakeTensor/opcheck, CUDA Graph replay | 191-test H20 suite |
 | vLLM | 0.24.0 | all registered adapters plus the existing operator and real-engine evidence | [evidence index](results/README.md) |
-| vLLM | 0.25.1 | official wheel import, registered adapters, dispatcher behavior, and the complete 183-test H20 suite | [compatibility gate](results/h20-vllm-compatibility-rust-bridge-20260723.json) |
+| vLLM | 0.25.1 | official wheel import, registered adapters, dispatcher behavior, and the complete 191-test H20 suite | [single-bridge gate](results/h20-single-rust-bridge-compatibility-20260723.json) |
 
 The 0.25.1 gate proves that the current adapters and CUDA paths execute against
 the official vLLM wheel. It does not retroactively transfer the 0.24
