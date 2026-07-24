@@ -65,6 +65,11 @@ spelling; Python package metadata uses the equivalent PEP 440 spelling.
   native-versus-FP8 benchmark metadata. Exact-byte, framework, operator,
   clean-wheel, and real-engine invocation H20 gates pass; the system-level
   native-versus-FP8 quality/capacity/serving gate remains open.
+- reproducible FP8 KV calibration and held-out corpus tools that pin the tool,
+  checkpoint, model config, tokenizer, dataset, package, selected-row, scale,
+  observer, and output digests without adding calibration dependencies to the
+  runtime wheel; the attention/KV-only recipe requires a stateful multi-sample
+  observer and leaves model weights unchanged.
 
 ### Fixed
 
@@ -79,6 +84,9 @@ spelling; Python package metadata uses the equivalent PEP 440 spelling.
 - kept vLLM's static `quant_fp8` query quantization opaque alongside
   `rotary_embedding`, allowing the official RoPE+KV fusion pattern to match and
   reach Loom for FP8-cache models.
+- additively registered vLLM's per-KV-head static-query RoPE+KV compiler form
+  while preserving its original scalar pattern, so dataset-calibrated
+  `attn_head` checkpoints reach the same Loom fusion boundary.
 
 ## 1.0.0-alpha.1 — 2026-07-22
 

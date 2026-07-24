@@ -452,10 +452,34 @@ PY
   --kv-cache-dtype fp8 --provider-order baseline-first \
   --result-json /tmp/qwen25-rope-paged-kv-fp8.json
 
+.venv-calibration/bin/python benchmarks/calibrate_fp8_kv.py \
+  --model /path/to/Qwen2.5-7B-Instruct \
+  --model-revision <pinned-upstream-revision> \
+  --dataset-parquet /path/to/ultrachat-200k-train-sft.parquet \
+  --output /path/to/Qwen2.5-7B-Instruct-kvattn-fp8-attn-head \
+  --attention-target Qwen2Attention \
+  --strategy attn_head \
+  --observer minmax \
+  --samples 512 \
+  --max-seq-len 2048
+
+.venv-calibration/bin/python benchmarks/prepare_quality_jsonl.py \
+  --model /path/to/Qwen2.5-7B-Instruct \
+  --dataset-parquet /path/to/ultrachat-200k-train-sft.parquet \
+  --messages-column messages \
+  --calibration-manifest \
+    /path/to/Qwen2.5-7B-Instruct-kvattn-fp8-attn-head/loom-calibration.json \
+  --output /path/to/ultrachat-qwen2.5-heldout-64x512.jsonl \
+  --sequences 64 \
+  --min-tokens 256 \
+  --max-tokens 512 \
+  --seed 43
+
 .venv-vllm/bin/python benchmarks/vllm_fp8_kv_system.py \
   --model /path/to/Qwen2.5-7B-Instruct-kvattn-fp8-attn-head \
   --model-revision <pinned-revision-or-checkpoint-digest> \
-  --quality-jsonl /path/to/pinned-quality-corpus.jsonl \
+  --quality-jsonl /path/to/ultrachat-qwen2.5-heldout-64x512.jsonl \
+  --quality-max-tokens 512 \
   --variant-order native-first \
   --result-json /tmp/fp8-kv-system-native-first.json
 
@@ -493,6 +517,25 @@ PY
   --warmup 2 --repeats 7 --provider-order loom-first \
   --result-json /tmp/qwen25-selected-logprobs-loom-first.json
 ```
+
+The calibration helper requires `llmcompressor`, `compressed-tensors`, and
+`datasets`; keep those optional tools outside the runtime environment. It
+refuses to overwrite a checkpoint and records source weights, corpus,
+model config, tokenizer, dependency versions, output weights, scale shapes, and
+SHA-256 provenance, including the helper itself, in `loom-calibration.json`.
+The attention/KV-only recipe calibrates the post-RoPE query and cache K/V
+scales required by vLLM without changing model weights. The observer is
+mandatory because it is a workload decision: `static_minmax` keeps the global
+range, while `minmax` uses an exponential moving average to smooth infrequent
+outliers. Stateless memoryless observers are deliberately not exposed by this
+tool. The corpus helper verifies the same source data and tokenizer, performs
+a deterministic tokenizer-qualified selection, excludes the exact calibration
+rows, and writes its own tool/source/output digests to a sidecar manifest. A
+small sample count is useful only as a pipeline smoke test; no observer or
+checkpoint is accepted until the pinned held-out system gate passes. A
+separately pinned WikiText JSONL remains useful as a cross-domain robustness
+diagnostic, but it is not a substitute for the representative held-out serving
+distribution.
 
 The microbenchmark compares `loom_cuda` and `vllm_c` through the same vLLM IR
 eager dispatcher and CUDA Graph replay. It warms the GPU before each provider

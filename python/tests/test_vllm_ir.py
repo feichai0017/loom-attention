@@ -313,6 +313,7 @@ def test_vllm_selected_token_path_handles_processed_greedy_batches(monkeypatch):
 
 
 def test_configures_vllm_rope_paged_kv_fusion():
+    from vllm.compilation.passes.fusion import rope_kvcache_fusion
     from vllm.config import CompilationConfig
     from vllm.v1.attention.backend import AttentionType
     from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
@@ -366,7 +367,13 @@ def test_configures_vllm_rope_paged_kv_fusion():
         kv_sharing_target_layer_name=None,
     )
     assert not FlashAttentionImpl.fused_rope_kvcache_supported(encoder_attention)
+    assert getattr(
+        rope_kvcache_fusion.RopeStaticQQuantKVCachePattern,
+        "_loom_registers_per_head",
+        False,
+    )
     assert provider_metadata()["rope_paged_kv_override"] is True
+    assert provider_metadata()["rope_paged_kv_per_head_pattern"] is True
 
 
 def test_vllm_paged_decode_shape_gate_is_conservative():

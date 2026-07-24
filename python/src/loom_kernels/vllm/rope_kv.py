@@ -7,6 +7,10 @@ from typing import Any
 import torch
 
 from .._torch_extension import load_torch_extension, torch_extension_available
+from ._rope_kv_fusion import (
+    install_per_head_rope_kv_pattern,
+    per_head_rope_kv_pattern_installed,
+)
 from ._runtime import supports_installed_vllm
 
 ROPE_PAGED_KV_OVERRIDE_KEY = "rope_paged_kv"
@@ -30,6 +34,8 @@ def register_vllm_rope_paged_kv() -> str | None:
 
     if not supports_installed_vllm():
         return None
+
+    install_per_head_rope_kv_pattern()
 
     from vllm.v1.attention.backend import AttentionType
     from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
@@ -183,5 +189,6 @@ def configure_vllm_rope_paged_kv(
 def _metadata() -> dict[str, object]:
     return {
         "rope_paged_kv_override": _ROPE_PAGED_KV_REGISTERED,
+        "rope_paged_kv_per_head_pattern": per_head_rope_kv_pattern_installed(),
         "rope_paged_kv_first_contract": _ROPE_PAGED_KV_FIRST_CONTRACT,
     }

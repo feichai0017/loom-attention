@@ -91,6 +91,14 @@ The opt-in RoPE+KV compiler adapter admits:
 fusion pass. The latter is required for static FP8 query quantization to remain
 matchable; Loom still replaces only the fused RoPE+cache-write boundary.
 
+vLLM 0.24/0.25's built-in static-Q pattern registers a scalar query scale.
+Dataset-calibrated `attn_head` checkpoints instead expose one query group per
+KV head. Loom keeps the built-in tensor pattern and additively registers that
+vector-scale form, with the same grouping used by vLLM's `QuantFP8`. This is a
+compiler-adapter fix only: FlashAttention still owns query quantization and
+attention, while Loom receives the already-loaded per-head K/V scales at the
+fused cache-write boundary.
+
 It deliberately rejects FP8 E5M2, FP8 per-token-head, INT8, NVFP4,
 TurboQuant, MLA-specific layouts, and dynamic scale production. Unsupported
 contracts retain vLLM's original RoPE and cache-write path.
@@ -136,6 +144,21 @@ random-token warmup calibration remain diagnostic modes, not accepted
 evidence. Both variant orders must pass before an artifact is accepted.
 Omitting the quality corpus, model revision, or calibrated cache scheme leaves
 the system gate explicitly `not_run`.
+
+`benchmarks/calibrate_fp8_kv.py` and
+`benchmarks/prepare_quality_jsonl.py` make the two input artifacts
+reproducible. The former follows the dataset-calibrated llm-compressor path and
+uses an attention/KV-only recipe with a stateful multi-sample observer. It
+calibrates the post-RoPE query and cache K/V scales required by vLLM without
+changing model weights, and records its own tool digest plus checkpoint, model
+config, tokenizer, observer, scale, package, and dataset provenance. The
+observer must be chosen explicitly and is accepted only through the held-out
+system-quality gate; stateless memoryless observers are excluded because they
+do not accumulate the pinned calibration set. The corpus helper verifies the
+same dataset and tokenizer, selects tokenizer-qualified evaluation rows by
+deterministic hash, excludes the exact calibration rows recorded by the
+former, and records its tool, source, and output digests. Calibration
+dependencies are tooling only and do not enter Loom's runtime wheel.
 
 The first four gates prove implementation and integration; the raw result is
 [recorded here](../results/h20-fp8-kv-cache-write-20260724.json). They show

@@ -190,6 +190,12 @@ Status: implementation and integration qualified; system-value exit open.
   package provenance, calibrated checkpoint scale scheme, and path telemetry
   are captured under a pinned model and corpus contract; an accepted
   order-reversed large-model artifact remains open;
+- ~~reproducible calibration and quality-corpus preparation~~ —
+  llm-compressor attention/KV calibration records source and output checkpoint
+  digests, model config, tokenizer, stateful observer, scale layouts, packages,
+  and corpus provenance; deterministic tokenizer-qualified JSONL selection
+  verifies the same data/tokenizer and records its own source and output
+  digests without adding calibration packages to the runtime wheel;
 - FlashAttention/FlashInfer consume the compressed cache directly, so Loom
   deliberately does not add a full-cache dequantize-on-read pass;
 - dynamic per-token-head scale caches and INT8 follow only when a named
